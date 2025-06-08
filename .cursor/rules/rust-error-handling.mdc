@@ -1,5 +1,350 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
+# Rust Error Handling Excellence
+
+## Purpose
+Establish comprehensive error handling patterns using Result types, custom error hierarchies, and panic management to build robust, maintainable Rust applications.
+
+## Requirements
+
+### Result Type Usage
+- Always use `Result<T, E>` for fallible operations
+- Prefer specific error types over generic ones
+- Use `?` operator for error propagation
+- Never use `unwrap()` in production code without justification
+- Use `expect()` with descriptive messages for programmer errors
+
+### Custom Error Design
+- Create domain-specific error types using `thiserror`
+- Implement error chains with `#[source]` attribute
+- Provide meaningful error messages for end users
+- Include context information for debugging
+- Support both Display and Debug representations
+
+### Error Context and Propagation
+- Add context when propagating errors across boundaries
+- Use `anyhow` for application-level error handling
+- Preserve error chains for debugging
+- Map errors appropriately at API boundaries
+- Include relevant state information in error context
+
+### Panic Management
+- Reserve panics for unrecoverable programmer errors
+- Use `panic!` only for logic errors and invariant violations
+- Prefer graceful degradation over panicking
+- Document panic conditions in function documentation
+- Use `Option` for expected absence of values
+
+## Examples
+
+### Custom Error Hierarchy
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum GroundhogError {
+    #[error("Configuration error: {message}")]
+    Config { 
+        message: String,
+        #[source]
+        source: Option<ConfigError>,
+    },
+    
+    #[error("File operation failed on {path}")]
+    FileOperation {
+        path: PathBuf,
+        operation: String,
+        #[source]
+        source: std::io::Error,
+    },
+    
+    #[error("Network request failed")]
+    Network(#[from] NetworkError),
+    
+    #[error("Parse error at line {line}, column {column}: {message}")]
+    Parse {
+        line: usize,
+        column: usize,
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+}
+
+#[derive(Error, Debug)]
+pub enum ConfigError {
+    #[error("Missing required field: {field}")]
+    MissingField { field: String },
+    
+    #[error("Invalid value for {field}: expected {expected}, got {actual}")]
+    InvalidValue {
+        field: String,
+        expected: String,
+        actual: String,
+    },
+    
+    #[error("File format error")]
+    Format(#[from] toml::de::Error),
+}
+```
+
+### Error Propagation Patterns
+```rust
+use anyhow::{Context, Result};
+
+// Good: Error propagation with context
+fn load_user_config(user_id: u64) -> Result<UserConfig> {
+    let config_path = get_config_path(user_id)
+        .with_context(|| format!("Failed to determine config path for user {}", user_id))?;
+    
+    let contents = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
+    
+    let config: UserConfig = toml::from_str(&contents)
+        .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
+    
+    validate_config(&config)
+        .with_context(|| "Configuration validation failed")?;
+    
+    Ok(config)
+}
+
+// Good: Converting between error types
+impl From<std::io::Error> for GroundhogError {
+    fn from(err: std::io::Error) -> Self {
+        match err.kind() {
+            std::io::ErrorKind::NotFound => GroundhogError::FileOperation {
+                path: PathBuf::new(), // Should be provided by caller
+                operation: "read".to_string(),
+                source: err,
+            },
+            std::io::ErrorKind::PermissionDenied => GroundhogError::FileOperation {
+                path: PathBuf::new(),
+                operation: "access".to_string(),
+                source: err,
+            },
+            _ => GroundhogError::FileOperation {
+                path: PathBuf::new(),
+                operation: "unknown".to_string(),
+                source: err,
+            },
+        }
+    }
+}
+```
+
+### Result Handling Patterns
+```rust
+// Good: Explicit error handling
+fn process_file(path: &Path) -> Result<ProcessedData, GroundhogError> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) => return Err(GroundhogError::FileOperation {
+            path: path.to_path_buf(),
+            operation: "read".to_string(),
+            source: e,
+        }),
+    };
+    
+    let data = parse_contents(&contents)?;
+    let processed = transform_data(data)?;
+    
+    Ok(processed)
+}
+
+// Good: Option handling without panics
+fn find_user_by_email(email: &str) -> Option<User> {
+    users.iter().find(|user| user.email == email).cloned()
+}
+
+fn get_user_or_create(email: &str) -> Result<User, DatabaseError> {
+    match find_user_by_email(email) {
+        Some(user) => Ok(user),
+        None => create_new_user(email),
+    }
+}
+
+// Good: Early returns with ?
+fn validate_and_process(input: &str) -> Result<Output, ValidationError> {
+    let cleaned = clean_input(input)?;
+    let validated = validate_format(&cleaned)?;
+    let normalized = normalize_data(&validated)?;
+    let output = process_data(&normalized)?;
+    
+    Ok(output)
+}
+```
+
+### Panic Management
+```rust
+// Good: Documented panic conditions
+/// Calculates the average of a slice of numbers.
+/// 
+/// # Panics
+/// 
+/// Panics if the slice is empty.
+fn average(numbers: &[f64]) -> f64 {
+    if numbers.is_empty() {
+        panic!("Cannot calculate average of empty slice");
+    }
+    numbers.iter().sum::<f64>() / numbers.len() as f64
+}
+
+// Better: Return Option instead of panicking
+fn safe_average(numbers: &[f64]) -> Option<f64> {
+    if numbers.is_empty() {
+        None
+    } else {
+        Some(numbers.iter().sum::<f64>() / numbers.len() as f64)
+    }
+}
+
+// Good: Using expect for programmer errors
+fn process_config() -> Config {
+    let home_dir = std::env::var("HOME")
+        .expect("HOME environment variable must be set");
+    
+    Config::load_from_dir(&home_dir)
+        .expect("Failed to load configuration from home directory")
+}
+
+// Good: Graceful handling of expected failures
+fn try_connect_with_fallback() -> Result<Connection, NetworkError> {
+    match try_connect_primary() {
+        Ok(conn) => Ok(conn),
+        Err(primary_err) => {
+            warn!("Primary connection failed: {}, trying fallback", primary_err);
+            try_connect_fallback()
+                .map_err(|fallback_err| NetworkError::AllConnectionsFailed {
+                    primary: Box::new(primary_err),
+                    fallback: Box::new(fallback_err),
+                })
+        }
+    }
+}
+```
+
+### Error Recovery Patterns
+```rust
+// Good: Retry with exponential backoff
+async fn retry_with_backoff<F, T, E>(
+    mut operation: F,
+    max_attempts: usize,
+) -> Result<T, E>
+where
+    F: FnMut() -> Result<T, E>,
+    E: std::fmt::Display,
+{
+    let mut attempts = 0;
+    let mut delay = Duration::from_millis(100);
+    
+    loop {
+        match operation() {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                attempts += 1;
+                if attempts >= max_attempts {
+                    return Err(e);
+                }
+                
+                warn!("Attempt {} failed: {}, retrying in {:?}", attempts, e, delay);
+                tokio::time::sleep(delay).await;
+                delay = std::cmp::min(delay * 2, Duration::from_secs(30));
+            }
+        }
+    }
+}
+
+// Good: Partial success handling
+fn process_batch(items: Vec<Item>) -> BatchResult {
+    let mut successes = Vec::new();
+    let mut failures = Vec::new();
+    
+    for (index, item) in items.into_iter().enumerate() {
+        match process_item(item) {
+            Ok(result) => successes.push((index, result)),
+            Err(e) => failures.push((index, e)),
+        }
+    }
+    
+    BatchResult { successes, failures }
+}
+```
+
+## Exceptions
+
+- `unwrap()` is acceptable in tests and examples
+- `panic!` is acceptable for unrecoverable logic errors
+- `expect()` is preferred over `unwrap()` with descriptive messages
+- Simple applications may use `anyhow::Error` instead of custom error types
+- Prototypes may use less sophisticated error handling
+
+## Anti-Patterns to Avoid
+
+```rust
+// Avoid: Swallowing errors
+fn bad_error_handling() -> Option<String> {
+    let result = risky_operation();
+    match result {
+        Ok(value) => Some(value),
+        Err(_) => None, // Lost error information!
+    }
+}
+
+// Avoid: Generic error types without context
+fn bad_generic_error() -> Result<String, Box<dyn std::error::Error>> {
+    let data = load_data()?; // What kind of error can this return?
+    process_data(data)       // How should caller handle different errors?
+}
+
+// Avoid: Unnecessary error conversion
+fn bad_conversion() -> Result<String, CustomError> {
+    let result = std::fs::read_to_string("file.txt")
+        .map_err(|e| CustomError::from(e.to_string()))?; // Loses error type info
+    Ok(result)
+}
+
+// Avoid: Panic in library code
+fn bad_library_function(input: &str) -> String {
+    if input.is_empty() {
+        panic!("Input cannot be empty!"); // Library shouldn't panic
+    }
+    process_input(input)
+}
+```
+
+## Testing Error Conditions
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_error_propagation() {
+        let result = process_invalid_data();
+        assert!(matches!(result, Err(GroundhogError::Parse { .. })));
+    }
+    
+    #[test]
+    fn test_error_context() {
+        let error = GroundhogError::Config {
+            message: "Invalid port".to_string(),
+            source: Some(ConfigError::InvalidValue {
+                field: "port".to_string(),
+                expected: "1-65535".to_string(),
+                actual: "99999".to_string(),
+            }),
+        };
+        
+        let error_string = format!("{}", error);
+        assert!(error_string.contains("Invalid port"));
+        
+        let source = error.source().unwrap();
+        assert!(format!("{}", source).contains("expected 1-65535"));
+    }
+}
+```

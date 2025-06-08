@@ -1,5 +1,509 @@
----
-description:
-globs:
-alwaysApply: false
----
+# Rust Performance Optimization
+
+## Purpose
+Define performance-focused patterns, profiling strategies, and zero-cost abstraction techniques for building high-performance Rust applications.
+
+## Requirements
+
+### Memory Efficiency
+- Minimize heap allocations and prefer stack allocation
+- Use `Vec::with_capacity()` when final size is known
+- Prefer `&str` over `String` for temporary data
+- Use `Cow<str>` for conditional ownership
+- Avoid unnecessary cloning and copying
+
+### CPU Optimization
+- Use iterators and lazy evaluation for data processing
+- Prefer `collect()` over manual loops when appropriate
+- Utilize SIMD instructions through explicit vectorization
+- Use `#[inline]` for hot path functions
+- Leverage Rust's zero-cost abstractions
+
+### I/O Performance
+- Use buffered I/O for file operations
+- Prefer async I/O for network operations
+- Batch operations to reduce syscall overhead
+- Use memory-mapped files for large file processing
+- Implement proper connection pooling
+
+### Data Structure Selection
+- Choose appropriate data structures for access patterns
+- Use `BTreeMap` for sorted data, `HashMap` for fast lookups
+- Consider `SmallVec` for usually-small collections
+- Use `ArrayVec` for fixed-size stack-allocated vectors
+- Implement custom data structures when needed
+
+## Examples
+
+### Memory-Efficient Patterns
+```rust
+use std::borrow::Cow;
+use smallvec::{SmallVec, smallvec};
+
+// Good: Pre-allocate when size is known
+fn process_items(count: usize) -> Vec<ProcessedItem> {
+    let mut results = Vec::with_capacity(count);
+    for i in 0..count {
+        results.push(process_item(i));
+    }
+    results
+}
+
+// Good: Use iterators for lazy evaluation
+fn filter_and_transform(items: &[Item]) -> Vec<TransformedItem> {
+    items
+        .iter()
+        .filter(|item| item.is_valid())
+        .map(|item| transform_item(item))
+        .collect()
+}
+
+// Good: Use Cow for conditional ownership
+fn normalize_string(input: &str) -> Cow<str> {
+    if input.chars().any(|c| c.is_uppercase()) {
+        Cow::Owned(input.to_lowercase())
+    } else {
+        Cow::Borrowed(input)
+    }
+}
+
+// Good: SmallVec for usually-small collections
+type SmallItems = SmallVec<[Item; 8]>;
+
+fn collect_small_items() -> SmallItems {
+    let mut items = smallvec![];
+    // Most cases will have <= 8 items, avoiding heap allocation
+    for i in 0..typical_small_count() {
+        items.push(create_item(i));
+    }
+    items
+}
+
+// Good: String interning for frequently used strings
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+struct StringInterner {
+    strings: Arc<Mutex<HashMap<String, Arc<str>>>>,
+}
+
+impl StringInterner {
+    fn new() -> Self {
+        Self {
+            strings: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+    
+    fn intern(&self, s: &str) -> Arc<str> {
+        let mut strings = self.strings.lock().unwrap();
+        if let Some(interned) = strings.get(s) {
+            interned.clone()
+        } else {
+            let interned: Arc<str> = Arc::from(s);
+            strings.insert(s.to_string(), interned.clone());
+            interned
+        }
+    }
+}
+```
+
+### CPU-Intensive Optimizations
+```rust
+use rayon::prelude::*;
+
+// Good: Parallel processing with rayon
+fn parallel_transform(items: Vec<Item>) -> Vec<ProcessedItem> {
+    items
+        .into_par_iter()
+        .map(|item| expensive_transform(item))
+        .collect()
+}
+
+// Good: SIMD operations for numerical computing
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+#[inline]
+fn simd_sum(values: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe { simd_sum_avx2(values) }
+        } else {
+            values.iter().sum()
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        values.iter().sum()
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn simd_sum_avx2(values: &[f32]) -> f32 {
+    let mut sum = _mm256_setzero_ps();
+    let chunks = values.chunks_exact(8);
+    let remainder = chunks.remainder();
+    
+    for chunk in chunks {
+        let vals = _mm256_loadu_ps(chunk.as_ptr());
+        sum = _mm256_add_ps(sum, vals);
+    }
+    
+    // Extract and sum the 8 values
+    let mut result = [0.0f32; 8];
+    _mm256_storeu_ps(result.as_mut_ptr(), sum);
+    let partial_sum: f32 = result.iter().sum();
+    
+    // Add remainder
+    partial_sum + remainder.iter().sum::<f32>()
+}
+
+// Good: Hot path optimization with inlining
+#[inline(always)]
+fn hot_path_function(x: u64) -> u64 {
+    // Critical path that should always be inlined
+    x.wrapping_mul(1664525).wrapping_add(1013904223)
+}
+
+// Good: Bit manipulation for performance
+fn count_set_bits(mut n: u64) -> u32 {
+    let mut count = 0;
+    while n != 0 {
+        count += 1;
+        n &= n - 1; // Clear the lowest set bit
+    }
+    count
+}
+
+// Better: Use built-in popcount
+fn count_set_bits_fast(n: u64) -> u32 {
+    n.count_ones()
+}
+```
+
+### I/O Performance Patterns
+```rust
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::fs::File;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
+
+// Good: Buffered file I/O
+fn process_large_file(path: &str) -> std::io::Result<Vec<String>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut lines = Vec::new();
+    
+    for line in std::io::BufRead::lines(reader) {
+        lines.push(line?);
+    }
+    
+    Ok(lines)
+}
+
+// Good: Async buffered I/O
+async fn async_process_file(path: &str) -> tokio::io::Result<String> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut reader = AsyncBufReader::new(file);
+    let mut contents = String::new();
+    reader.read_to_string(&mut contents).await?;
+    Ok(contents)
+}
+
+// Good: Memory-mapped files for large data
+use memmap2::Mmap;
+
+fn process_large_data_file(path: &str) -> Result<Statistics, Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    
+    // Process data without loading into memory
+    let mut stats = Statistics::new();
+    for chunk in mmap.chunks(1024) {
+        stats.update(chunk);
+    }
+    
+    Ok(stats)
+}
+
+// Good: Batch operations for network requests
+async fn batch_http_requests(urls: Vec<String>) -> Vec<Result<String, reqwest::Error>> {
+    use futures::stream::{self, StreamExt};
+    
+    stream::iter(urls)
+        .map(|url| async move {
+            reqwest::get(&url).await?.text().await
+        })
+        .buffer_unordered(10) // Limit concurrent requests
+        .collect()
+        .await
+}
+```
+
+### Data Structure Performance
+```rust
+use std::collections::{HashMap, BTreeMap, VecDeque};
+use ahash::AHashMap; // Faster hash map for many use cases
+
+// Good: Choose appropriate data structures
+struct PerformanceOptimizedCache {
+    // Fast lookups
+    index: AHashMap<String, usize>,
+    // Ordered data for LRU
+    items: VecDeque<CacheItem>,
+    // Sorted keys for range queries
+    sorted_keys: BTreeMap<String, usize>,
+}
+
+impl PerformanceOptimizedCache {
+    fn get(&self, key: &str) -> Option<&CacheItem> {
+        let index = self.index.get(key)?;
+        self.items.get(*index)
+    }
+    
+    fn range_query(&self, start: &str, end: &str) -> Vec<&CacheItem> {
+        self.sorted_keys
+            .range(start..end)
+            .filter_map(|(_, &index)| self.items.get(index))
+            .collect()
+    }
+}
+
+// Good: Custom data structure for specific use case
+struct PackedInts {
+    data: Vec<u8>,
+    bits_per_int: u8,
+}
+
+impl PackedInts {
+    fn new(bits_per_int: u8) -> Self {
+        assert!(bits_per_int <= 64);
+        Self {
+            data: Vec::new(),
+            bits_per_int,
+        }
+    }
+    
+    fn push(&mut self, value: u64) {
+        // Pack integers to save memory
+        let mask = (1u64 << self.bits_per_int) - 1;
+        let packed_value = value & mask;
+        
+        // Bit manipulation to pack values
+        // Implementation depends on specific requirements
+    }
+    
+    fn get(&self, index: usize) -> Option<u64> {
+        // Unpack integer from bit-packed storage
+        // Implementation depends on specific requirements
+        None
+    }
+}
+```
+
+### Profiling and Benchmarking
+```rust
+use std::time::{Duration, Instant};
+
+// Good: Manual timing for critical sections
+fn timed_operation<F, R>(operation: F) -> (R, Duration)
+where
+    F: FnOnce() -> R,
+{
+    let start = Instant::now();
+    let result = operation();
+    let duration = start.elapsed();
+    (result, duration)
+}
+
+// Good: Benchmarking with criterion
+#[cfg(test)]
+mod benchmarks {
+    use super::*;
+    use criterion::{black_box, criterion_group, criterion_main, Criterion};
+    
+    fn benchmark_algorithms(c: &mut Criterion) {
+        let data = generate_test_data(1000);
+        
+        c.bench_function("algorithm_v1", |b| {
+            b.iter(|| algorithm_v1(black_box(&data)))
+        });
+        
+        c.bench_function("algorithm_v2", |b| {
+            b.iter(|| algorithm_v2(black_box(&data)))
+        });
+    }
+    
+    criterion_group!(benches, benchmark_algorithms);
+    criterion_main!(benches);
+}
+
+// Good: Performance monitoring in production
+use std::sync::atomic::{AtomicU64, Ordering};
+
+struct PerformanceMetrics {
+    total_requests: AtomicU64,
+    total_duration: AtomicU64,
+}
+
+impl PerformanceMetrics {
+    fn record_request(&self, duration: Duration) {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.total_duration.fetch_add(
+            duration.as_nanos() as u64, 
+            Ordering::Relaxed
+        );
+    }
+    
+    fn average_duration(&self) -> Duration {
+        let requests = self.total_requests.load(Ordering::Relaxed);
+        let total_nanos = self.total_duration.load(Ordering::Relaxed);
+        
+        if requests == 0 {
+            Duration::from_nanos(0)
+        } else {
+            Duration::from_nanos(total_nanos / requests)
+        }
+    }
+}
+```
+
+### Zero-Cost Abstractions
+```rust
+// Good: Iterator chains compile to tight loops
+fn process_data_efficiently(data: &[i32]) -> i32 {
+    data.iter()
+        .filter(|&&x| x > 0)
+        .map(|&x| x * 2)
+        .fold(0, |acc, x| acc + x)
+}
+
+// Good: Generic functions with no runtime cost
+#[inline]
+fn generic_max<T: Ord>(a: T, b: T) -> T {
+    if a > b { a } else { b }
+}
+
+// Good: Const generics for compile-time optimization
+struct FixedSizeProcessor<const N: usize> {
+    buffer: [u8; N],
+}
+
+impl<const N: usize> FixedSizeProcessor<N> {
+    const fn new() -> Self {
+        Self {
+            buffer: [0; N],
+        }
+    }
+    
+    fn process(&mut self) {
+        // Compiler can optimize based on known N
+        for i in 0..N {
+            self.buffer[i] = self.buffer[i].wrapping_add(1);
+        }
+    }
+}
+
+// Good: Newtype pattern with zero runtime cost
+#[repr(transparent)]
+struct UserId(u64);
+
+impl UserId {
+    #[inline(always)]
+    fn new(id: u64) -> Self {
+        UserId(id)
+    }
+    
+    #[inline(always)]
+    fn value(self) -> u64 {
+        self.0
+    }
+}
+```
+
+## Exceptions
+
+- Premature optimization should be avoided
+- Readability sometimes takes precedence over micro-optimizations
+- Profile before optimizing to identify real bottlenecks
+- Some optimizations may not be portable across platforms
+- Complex optimizations may require extensive testing
+
+## Anti-Patterns to Avoid
+
+```rust
+// Avoid: Unnecessary allocations
+fn bad_string_processing(s: &str) -> String {
+    s.to_string() + "suffix" // Allocates unnecessarily
+}
+
+// Better: Use format! or push_str
+fn good_string_processing(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 6);
+    result.push_str(s);
+    result.push_str("suffix");
+    result
+}
+
+// Avoid: Excessive cloning
+fn bad_data_processing(items: &[Item]) -> Vec<ProcessedItem> {
+    items.iter()
+        .map(|item| item.clone()) // Unnecessary clone
+        .map(|item| process_item(item))
+        .collect()
+}
+
+// Avoid: Inefficient data structures
+fn bad_unique_items(items: Vec<Item>) -> Vec<Item> {
+    let mut unique = Vec::new();
+    for item in items {
+        if !unique.contains(&item) { // O(n) search each time!
+            unique.push(item);
+        }
+    }
+    unique
+}
+
+// Better: Use HashSet
+use std::collections::HashSet;
+fn good_unique_items(items: Vec<Item>) -> Vec<Item> {
+    let mut seen = HashSet::new();
+    items.into_iter()
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
+}
+```
+
+## Profiling Tools and Techniques
+
+- Use `cargo bench` with criterion for microbenchmarks
+- Use `perf` on Linux for system-level profiling
+- Use `cargo flamegraph` for flame graph generation
+- Use `valgrind` for memory profiling
+- Use `tokio-console` for async runtime profiling
+- Use `tracing` for application-level performance monitoring
+
+## Performance Testing
+
+```rust
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    
+    #[test]
+    fn test_performance_regression() {
+        let data = generate_large_dataset();
+        let start = Instant::now();
+        
+        let result = critical_algorithm(&data);
+        
+        let duration = start.elapsed();
+        
+        // Ensure performance doesn't regress
+        assert!(duration < Duration::from_millis(100));
+        assert_eq!(result.len(), expected_result_size());
+    }
+}
+```

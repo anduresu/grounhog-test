@@ -1,5 +1,441 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
+# Rust Async and Concurrency Mastery
+
+## Purpose
+Define best practices for async/await programming, concurrent data structures, thread safety, and performance optimization in async Rust applications.
+
+## Requirements
+
+### Async Function Design
+- Use `async fn` for I/O-bound operations
+- Prefer `async` blocks for fine-grained control
+- Return `impl Future` for zero-cost abstractions
+- Use `Send + Sync` bounds when crossing thread boundaries
+- Avoid blocking operations in async contexts
+
+### Task Management
+- Use `tokio::spawn` for CPU-bound work that should run concurrently
+- Use `tokio::task::spawn_blocking` for blocking operations
+- Group related async operations with `join!` and `select!`
+- Use `tokio::task::JoinSet` for dynamic task collections
+- Handle task cancellation gracefully with `CancellationToken`
+
+### Synchronization Primitives
+- Use `tokio::sync::Mutex` for async-aware locking
+- Prefer `RwLock` over `Mutex` for read-heavy workloads
+- Use `Semaphore` for rate limiting and resource management
+- Use channels (`mpsc`, `oneshot`, `broadcast`) for communication
+- Use `Notify` for simple signaling between tasks
+
+### Error Handling in Async
+- Propagate errors properly through async boundaries
+- Use `anyhow` or custom error types with async
+- Handle timeouts with `tokio::time::timeout`
+- Use `try_join!` for fail-fast behavior
+- Implement proper cleanup in async destructors
+
+## Examples
+
+### Async Function Patterns
+```rust
+use std::future::Future;
+use tokio::{time::{sleep, Duration}, io::AsyncReadExt};
+
+// Good: Simple async function
+async fn fetch_data(url: &str) -> Result<String, reqwest::Error> {
+    let response = reqwest::get(url).await?;
+    let text = response.text().await?;
+    Ok(text)
+}
+
+// Good: Generic async function with Send bound
+async fn process_items<T, F, Fut>(items: Vec<T>, processor: F) -> Vec<Result<String, ProcessError>>
+where
+    T: Send + 'static,
+    F: Fn(T) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<String, ProcessError>> + Send,
+{
+    let tasks: Vec<_> = items
+        .into_iter()
+        .map(|item| tokio::spawn(processor(item)))
+        .collect();
+    
+    let mut results = Vec::new();
+    for task in tasks {
+        match task.await {
+            Ok(result) => results.push(result),
+            Err(_) => results.push(Err(ProcessError::TaskPanic)),
+        }
+    }
+    results
+}
+
+// Good: Async closure and block patterns
+async fn complex_operation() -> Result<ProcessedData, AppError> {
+    let data = async {
+        let raw = fetch_raw_data().await?;
+        validate_data(&raw)?;
+        Ok::<_, AppError>(raw)
+    }.await?;
+    
+    let processed = tokio::task::spawn_blocking(move || {
+        // CPU-intensive work
+        expensive_computation(data)
+    }).await??;
+    
+    Ok(processed)
+}
+```
+
+### Concurrent Task Management
+```rust
+use tokio::{join, select, time::{timeout, Duration}};
+use tokio::task::JoinSet;
+
+// Good: Concurrent execution with join
+async fn parallel_processing() -> Result<(DataA, DataB, DataC), AppError> {
+    let (result_a, result_b, result_c) = join!(
+        fetch_data_a(),
+        fetch_data_b(),
+        fetch_data_c()
+    );
+    
+    Ok((result_a?, result_b?, result_c?))
+}
+
+// Good: Racing operations with select
+async fn fetch_with_fallback() -> Result<String, AppError> {
+    select! {
+        result = fetch_primary() => {
+            match result {
+                Ok(data) => Ok(data),
+                Err(e) => {
+                    warn!("Primary fetch failed: {}, trying fallback", e);
+                    fetch_fallback().await
+                }
+            }
+        }
+        _ = sleep(Duration::from_secs(5)) => {
+            warn!("Primary fetch timed out, trying fallback");
+            fetch_fallback().await
+        }
+    }
+}
+
+// Good: Dynamic task management
+async fn process_dynamic_workload(items: Vec<WorkItem>) -> Vec<Result<Output, WorkError>> {
+    let mut set = JoinSet::new();
+    
+    // Spawn tasks
+    for item in items {
+        set.spawn(async move {
+            process_work_item(item).await
+        });
+    }
+    
+    // Collect results as they complete
+    let mut results = Vec::new();
+    while let Some(result) = set.join_next().await {
+        match result {
+            Ok(output) => results.push(output),
+            Err(join_error) => {
+                error!("Task panicked: {}", join_error);
+                results.push(Err(WorkError::TaskPanic));
+            }
+        }
+    }
+    
+    results
+}
+```
+
+### Synchronization and Communication
+```rust
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, oneshot, Notify};
+use std::sync::Arc;
+
+// Good: Async-aware shared state
+struct SharedCache {
+    data: RwLock<HashMap<String, CacheEntry>>,
+    semaphore: Semaphore,
+}
+
+impl SharedCache {
+    fn new(max_concurrent: usize) -> Self {
+        Self {
+            data: RwLock::new(HashMap::new()),
+            semaphore: Semaphore::new(max_concurrent),
+        }
+    }
+    
+    async fn get(&self, key: &str) -> Option<CacheEntry> {
+        let _permit = self.semaphore.acquire().await.ok()?;
+        let data = self.data.read().await;
+        data.get(key).cloned()
+    }
+    
+    async fn insert(&self, key: String, value: CacheEntry) {
+        let _permit = self.semaphore.acquire().await.unwrap();
+        let mut data = self.data.write().await;
+        data.insert(key, value);
+    }
+}
+
+// Good: Producer-consumer pattern
+async fn producer_consumer_example() {
+    let (tx, mut rx) = mpsc::channel::<WorkItem>(100);
+    
+    // Producer task
+    let producer = tokio::spawn(async move {
+        for i in 0..1000 {
+            let item = WorkItem::new(i);
+            if tx.send(item).await.is_err() {
+                break; // Consumer dropped
+            }
+        }
+    });
+    
+    // Consumer tasks
+    let mut consumers = Vec::new();
+    for _ in 0..4 {
+        let mut consumer_rx = rx.clone();
+        consumers.push(tokio::spawn(async move {
+            while let Some(item) = consumer_rx.recv().await {
+                process_item(item).await;
+            }
+        }));
+    }
+    
+    // Wait for producer to finish
+    producer.await.unwrap();
+    
+    // Close channel and wait for consumers
+    drop(rx);
+    for consumer in consumers {
+        consumer.await.unwrap();
+    }
+}
+
+// Good: Request-response pattern
+async fn request_response_service() {
+    let (request_tx, mut request_rx) = mpsc::channel::<(Request, oneshot::Sender<Response>)>(100);
+    
+    // Service task
+    tokio::spawn(async move {
+        while let Some((request, response_tx)) = request_rx.recv().await {
+            let response = process_request(request).await;
+            let _ = response_tx.send(response); // Ignore if receiver dropped
+        }
+    });
+    
+    // Client usage
+    let (response_tx, response_rx) = oneshot::channel();
+    let request = Request::new("data");
+    
+    if request_tx.send((request, response_tx)).await.is_ok() {
+        match timeout(Duration::from_secs(5), response_rx).await {
+            Ok(Ok(response)) => println!("Got response: {:?}", response),
+            Ok(Err(_)) => println!("Service dropped response"),
+            Err(_) => println!("Request timed out"),
+        }
+    }
+}
+```
+
+### Cancellation and Timeouts
+```rust
+use tokio_util::sync::CancellationToken;
+
+// Good: Graceful cancellation
+async fn cancellable_operation(token: CancellationToken) -> Result<String, OperationError> {
+    let mut data = String::new();
+    
+    for i in 0..100 {
+        // Check for cancellation
+        if token.is_cancelled() {
+            return Err(OperationError::Cancelled);
+        }
+        
+        // Do some work
+        select! {
+            result = fetch_chunk(i) => {
+                data.push_str(&result?);
+            }
+            _ = token.cancelled() => {
+                return Err(OperationError::Cancelled);
+            }
+        }
+    }
+    
+    Ok(data)
+}
+
+// Good: Timeout handling
+async fn operation_with_timeout() -> Result<String, AppError> {
+    match timeout(Duration::from_secs(30), long_running_operation()).await {
+        Ok(result) => result.map_err(AppError::from),
+        Err(_) => Err(AppError::Timeout),
+    }
+}
+
+// Good: Nested cancellation
+async fn coordinated_shutdown(parent_token: CancellationToken) {
+    let child_token = parent_token.child_token();
+    
+    let task1 = tokio::spawn(worker_task(child_token.clone()));
+    let task2 = tokio::spawn(worker_task(child_token.clone()));
+    
+    // Wait for parent cancellation
+    parent_token.cancelled().await;
+    
+    // Cancel child tasks
+    child_token.cancel();
+    
+    // Wait for tasks to finish
+    let _ = join!(task1, task2);
+}
+```
+
+### Stream Processing
+```rust
+use futures::{Stream, StreamExt, stream};
+use tokio_stream::wrappers::ReceiverStream;
+
+// Good: Stream processing patterns
+async fn process_stream<S>(mut stream: S) -> Result<Vec<ProcessedItem>, StreamError>
+where
+    S: Stream<Item = RawItem> + Unpin,
+{
+    let mut results = Vec::new();
+    
+    while let Some(item) = stream.next().await {
+        let processed = process_item(item).await?;
+        results.push(processed);
+        
+        // Yield control periodically
+        if results.len() % 100 == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    
+    Ok(results)
+}
+
+// Good: Buffered stream processing
+async fn buffered_processing() -> Result<(), AppError> {
+    let (tx, rx) = mpsc::channel(1000);
+    let stream = ReceiverStream::new(rx);
+    
+    // Producer
+    tokio::spawn(async move {
+        for i in 0..10000 {
+            if tx.send(i).await.is_err() {
+                break;
+            }
+        }
+    });
+    
+    // Process in chunks
+    let results: Vec<_> = stream
+        .chunks(50)
+        .map(|chunk| async move {
+            // Process chunk concurrently
+            let futures: Vec<_> = chunk.into_iter()
+                .map(|item| process_item(item))
+                .collect();
+            
+            futures::future::join_all(futures).await
+        })
+        .buffer_unordered(4) // Process 4 chunks concurrently
+        .collect()
+        .await;
+    
+    Ok(())
+}
+```
+
+## Exceptions
+
+- Blocking operations are acceptable in `spawn_blocking`
+- `std::sync` types are acceptable for CPU-bound work
+- Thread-local storage is acceptable for request-scoped data
+- `unsafe` may be needed for high-performance async code
+- Simple applications may not need complex cancellation patterns
+
+## Anti-Patterns to Avoid
+
+```rust
+// Avoid: Blocking in async context
+async fn bad_blocking() {
+    std::thread::sleep(Duration::from_secs(1)); // Blocks the executor!
+    // Use: tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+// Avoid: Unnecessary async
+async fn bad_sync_wrapper() -> i32 {
+    42 // No async work, don't make it async
+}
+
+// Avoid: Not handling join errors
+async fn bad_join_handling() {
+    let handle = tokio::spawn(risky_operation());
+    let result = handle.await.unwrap(); // Panics if task panics!
+    // Should check for JoinError first
+}
+
+// Avoid: Shared mutable state without synchronization
+static mut GLOBAL_COUNTER: i32 = 0; // Unsafe and wrong!
+
+// Avoid: Blocking mutex in async
+use std::sync::Mutex;
+async fn bad_mutex(mutex: Arc<Mutex<i32>>) {
+    let _guard = mutex.lock().unwrap(); // Can block the async runtime
+    // Use: tokio::sync::Mutex
+}
+```
+
+## Performance Considerations
+
+- Use `futures::stream::iter` for converting iterators to streams
+- Prefer `try_join!` over sequential awaiting when possible
+- Use `select!` judiciously - it can introduce complexity
+- Consider `rayon` for CPU-intensive parallel work
+- Profile async code to identify bottlenecks
+- Use `tokio-console` for runtime debugging
+
+## Testing Async Code
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_test::{assert_ok, assert_err, task};
+    
+    #[tokio::test]
+    async fn test_async_operation() {
+        let result = async_operation().await;
+        assert_ok!(result);
+    }
+    
+    #[tokio::test]
+    async fn test_timeout() {
+        let result = timeout(Duration::from_millis(100), slow_operation()).await;
+        assert_err!(result); // Should timeout
+    }
+    
+    #[test]
+    fn test_future_ready() {
+        let mut future = Box::pin(async_operation());
+        
+        // Test that future is not ready initially
+        assert!(task::spawn(&mut future).poll().is_pending());
+        
+        // Advance time and test again
+        // (specific to your async runtime and test setup)
+    }
+}
+```

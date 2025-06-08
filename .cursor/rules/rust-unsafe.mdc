@@ -1,5 +1,690 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
+# Rust Unsafe Code Excellence
+
+## Purpose
+Establish rigorous patterns for `unsafe` code blocks, FFI boundaries, raw pointer manipulation, and memory safety contracts while maintaining Rust's zero-cost abstraction guarantees.
+
+## Requirements
+
+### Unsafe Code Principles
+- Minimize unsafe code and isolate it in well-defined boundaries
+- Document all safety invariants and preconditions
+- Provide safe abstractions over unsafe operations
+- Use `unsafe` only when necessary for performance or FFI
+- Prefer safe alternatives when performance difference is negligible
+
+### Memory Safety Contracts
+- Clearly document ownership and lifetime requirements
+- Ensure all memory accesses are within valid bounds
+- Prevent use-after-free and double-free errors
+- Maintain alignment requirements for all pointer operations
+- Document thread safety implications of unsafe operations
+
+### FFI and Interoperability
+- Validate all data crossing FFI boundaries
+- Handle C string lifetimes correctly
+- Use appropriate repr types for C compatibility
+- Manage resource ownership across language boundaries
+- Provide safe Rust wrappers for C APIs
+
+### Testing and Verification
+- Test unsafe code more rigorously than safe code
+- Use tools like Miri for undefined behavior detection
+- Document and test all safety invariants
+- Use static analysis tools for additional verification
+- Provide comprehensive documentation for safety proofs
+
+## Examples
+
+### Safe Abstractions Over Unsafe Code
+```rust
+use std::ptr;
+use std::mem;
+use std::slice;
+
+/// A safe vector implementation using unsafe operations for performance
+pub struct FastVec<T> {
+    ptr: *mut T,
+    len: usize,
+    capacity: usize,
+}
+
+impl<T> FastVec<T> {
+    pub fn new() -> Self {
+        Self {
+            ptr: ptr::NonNull::dangling().as_ptr(),
+            len: 0,
+            capacity: 0,
+        }
+    }
+    
+    pub fn with_capacity(capacity: usize) -> Self {
+        if capacity == 0 {
+            return Self::new();
+        }
+        
+        let layout = std::alloc::Layout::array::<T>(capacity).unwrap();
+        let ptr = unsafe {
+            std::alloc::alloc(layout) as *mut T
+        };
+        
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        
+        Self { ptr, len: 0, capacity }
+    }
+    
+    /// SAFETY: Caller must ensure index < self.len
+    unsafe fn get_unchecked(&self, index: usize) -> &T {
+        debug_assert!(index < self.len);
+        &*self.ptr.add(index)
+    }
+    
+    /// SAFETY: Caller must ensure index < self.len
+    unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
+        debug_assert!(index < self.len);
+        &mut *self.ptr.add(index)
+    }
+    
+    pub fn push(&mut self, item: T) {
+        if self.len == self.capacity {
+            self.grow();
+        }
+        
+        unsafe {
+            ptr::write(self.ptr.add(self.len), item);
+        }
+        self.len += 1;
+    }
+    
+    pub fn pop(&mut self) -> Option<T> {
+        if self.len == 0 {
+            None
+        } else {
+            self.len -= 1;
+            unsafe {
+                Some(ptr::read(self.ptr.add(self.len)))
+            }
+        }
+    }
+    
+    fn grow(&mut self) {
+        let new_capacity = if self.capacity == 0 { 4 } else { self.capacity * 2 };
+        
+        let new_layout = std::alloc::Layout::array::<T>(new_capacity).unwrap();
+        let new_ptr = unsafe {
+            if self.capacity == 0 {
+                std::alloc::alloc(new_layout)
+            } else {
+                let old_layout = std::alloc::Layout::array::<T>(self.capacity).unwrap();
+                std::alloc::realloc(self.ptr as *mut u8, old_layout, new_layout.size())
+            }
+        } as *mut T;
+        
+        if new_ptr.is_null() {
+            std::alloc::handle_alloc_error(new_layout);
+        }
+        
+        self.ptr = new_ptr;
+        self.capacity = new_capacity;
+    }
+}
+
+impl<T> Drop for FastVec<T> {
+    fn drop(&mut self) {
+        // Drop all elements
+        while self.len > 0 {
+            self.len -= 1;
+            unsafe {
+                ptr::drop_in_place(self.ptr.add(self.len));
+            }
+        }
+        
+        // Deallocate memory
+        if self.capacity > 0 {
+            unsafe {
+                let layout = std::alloc::Layout::array::<T>(self.capacity).unwrap();
+                std::alloc::dealloc(self.ptr as *mut u8, layout);
+            }
+        }
+    }
+}
+
+// SAFETY: FastVec<T> is Send if T is Send because we properly manage ownership
+unsafe impl<T: Send> Send for FastVec<T> {}
+
+// SAFETY: FastVec<T> is Sync if T is Sync because we don't share mutable access
+unsafe impl<T: Sync> Sync for FastVec<T> {}
+```
+
+### Raw Pointer Manipulation
+```rust
+use std::ptr::NonNull;
+
+/// A safe wrapper around raw pointers with documented safety invariants
+pub struct SafePtr<T> {
+    ptr: NonNull<T>,
+    // Invariants:
+    // 1. ptr is always valid and properly aligned
+    // 2. ptr points to initialized data of type T
+    // 3. No other mutable references to this data exist
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> SafePtr<T> {
+    /// Creates a new SafePtr from a Box
+    /// 
+    /// SAFETY: This is safe because Box guarantees:
+    /// - Valid pointer
+    /// - Proper alignment
+    /// - Initialized data
+    /// - Unique ownership
+    pub fn from_box(boxed: Box<T>) -> Self {
+        let ptr = NonNull::new(Box::into_raw(boxed)).unwrap();
+        Self {
+            ptr,
+            _marker: std::marker::PhantomData,
+        }
+    }
+    
+    /// Creates a SafePtr from a raw pointer
+    /// 
+    /// # Safety
+    /// 
+    /// The caller must ensure:
+    /// - `ptr` is non-null and properly aligned
+    /// - `ptr` points to a valid, initialized value of type T
+    /// - No other mutable references to this data exist
+    /// - The data will remain valid for the lifetime of this SafePtr
+    pub unsafe fn from_raw(ptr: *mut T) -> Option<Self> {
+        NonNull::new(ptr).map(|ptr| Self {
+            ptr,
+            _marker: std::marker::PhantomData,
+        })
+    }
+    
+    /// Returns a shared reference to the pointed data
+    /// 
+    /// SAFETY: Safe because our invariants guarantee valid, initialized data
+    pub fn as_ref(&self) -> &T {
+        unsafe { self.ptr.as_ref() }
+    }
+    
+    /// Returns a mutable reference to the pointed data
+    /// 
+    /// SAFETY: Safe because our invariants guarantee unique access
+    pub fn as_mut(&mut self) -> &mut T {
+        unsafe { self.ptr.as_mut() }
+    }
+    
+    /// Performs a volatile read from the pointer
+    /// 
+    /// Use this for memory-mapped I/O or when the compiler might optimize away reads
+    pub fn read_volatile(&self) -> T 
+    where 
+        T: Copy 
+    {
+        unsafe { self.ptr.as_ptr().read_volatile() }
+    }
+    
+    /// Performs a volatile write to the pointer
+    /// 
+    /// Use this for memory-mapped I/O or when the compiler might optimize away writes
+    pub fn write_volatile(&mut self, value: T) {
+        unsafe {
+            self.ptr.as_ptr().write_volatile(value);
+        }
+    }
+}
+
+impl<T> Drop for SafePtr<T> {
+    fn drop(&mut self) {
+        unsafe {
+            // Convert back to Box to properly deallocate
+            let _ = Box::from_raw(self.ptr.as_ptr());
+        }
+    }
+}
+
+// SAFETY: SafePtr<T> is Send if T is Send because we maintain unique ownership
+unsafe impl<T: Send> Send for SafePtr<T> {}
+```
+
+### FFI Wrappers and Bindings
+```rust
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ptr;
+
+// External C function declarations
+extern "C" {
+    fn c_library_init() -> c_int;
+    fn c_library_process(data: *const u8, len: usize, output: *mut u8, output_len: *mut usize) -> c_int;
+    fn c_library_cleanup();
+    fn c_library_get_error_message() -> *const c_char;
+}
+
+/// Safe Rust wrapper for C library operations
+pub struct CLibraryWrapper {
+    initialized: bool,
+}
+
+#[derive(Debug)]
+pub enum CLibraryError {
+    InitializationFailed,
+    ProcessingFailed(String),
+    BufferTooSmall { required: usize, provided: usize },
+    InvalidUtf8,
+}
+
+impl CLibraryWrapper {
+    pub fn new() -> Result<Self, CLibraryError> {
+        let result = unsafe { c_library_init() };
+        if result == 0 {
+            Ok(Self { initialized: true })
+        } else {
+            Err(CLibraryError::InitializationFailed)
+        }
+    }
+    
+    pub fn process_data(&self, input: &[u8]) -> Result<Vec<u8>, CLibraryError> {
+        if !self.initialized {
+            return Err(CLibraryError::InitializationFailed);
+        }
+        
+        // Start with a reasonable buffer size
+        let mut output_buffer = vec![0u8; input.len() * 2];
+        let mut actual_len = output_buffer.len();
+        
+        let result = unsafe {
+            c_library_process(
+                input.as_ptr(),
+                input.len(),
+                output_buffer.as_mut_ptr(),
+                &mut actual_len,
+            )
+        };
+        
+        match result {
+            0 => {
+                // Success - truncate buffer to actual size
+                output_buffer.truncate(actual_len);
+                Ok(output_buffer)
+            }
+            1 => {
+                // Buffer too small - retry with larger buffer
+                if actual_len <= output_buffer.len() {
+                    return Err(CLibraryError::ProcessingFailed(
+                        "C library returned inconsistent size information".to_string()
+                    ));
+                }
+                
+                output_buffer.resize(actual_len, 0);
+                let result = unsafe {
+                    c_library_process(
+                        input.as_ptr(),
+                        input.len(),
+                        output_buffer.as_mut_ptr(),
+                        &mut actual_len,
+                    )
+                };
+                
+                if result == 0 {
+                    output_buffer.truncate(actual_len);
+                    Ok(output_buffer)
+                } else {
+                    Err(self.get_last_error())
+                }
+            }
+            _ => Err(self.get_last_error()),
+        }
+    }
+    
+    fn get_last_error(&self) -> CLibraryError {
+        unsafe {
+            let error_ptr = c_library_get_error_message();
+            if error_ptr.is_null() {
+                CLibraryError::ProcessingFailed("Unknown error".to_string())
+            } else {
+                match CStr::from_ptr(error_ptr).to_str() {
+                    Ok(error_msg) => CLibraryError::ProcessingFailed(error_msg.to_string()),
+                    Err(_) => CLibraryError::InvalidUtf8,
+                }
+            }
+        }
+    }
+}
+
+impl Drop for CLibraryWrapper {
+    fn drop(&mut self) {
+        if self.initialized {
+            unsafe {
+                c_library_cleanup();
+            }
+        }
+    }
+}
+
+// SAFETY: CLibraryWrapper maintains its own internal synchronization
+unsafe impl Send for CLibraryWrapper {}
+
+/// Safe string conversion utilities for FFI
+pub mod ffi_strings {
+    use super::*;
+    
+    /// Convert Rust string to C string, handling potential null bytes
+    pub fn rust_to_c_string(s: &str) -> Result<CString, std::ffi::NulError> {
+        CString::new(s)
+    }
+    
+    /// Convert C string to Rust string, handling invalid UTF-8
+    /// 
+    /// # Safety
+    /// 
+    /// The caller must ensure that `ptr` is:
+    /// - A valid pointer to a null-terminated C string
+    /// - Valid for the duration of the function call
+    /// - Not modified by other threads during the call
+    pub unsafe fn c_to_rust_string(ptr: *const c_char) -> Result<String, std::str::Utf8Error> {
+        if ptr.is_null() {
+            return Ok(String::new());
+        }
+        
+        let c_str = CStr::from_ptr(ptr);
+        c_str.to_str().map(|s| s.to_string())
+    }
+    
+    /// Temporarily convert Rust string to C string for a function call
+    pub fn with_c_string<F, R>(s: &str, f: F) -> Result<R, std::ffi::NulError> 
+    where
+        F: FnOnce(*const c_char) -> R,
+    {
+        let c_string = CString::new(s)?;
+        Ok(f(c_string.as_ptr()))
+    }
+}
+```
+
+### Atomic Operations and Lock-Free Data Structures
+```rust
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::ptr;
+
+/// A simple lock-free stack implementation
+pub struct LockFreeStack<T> {
+    head: AtomicPtr<Node<T>>,
+    len: AtomicUsize,
+}
+
+struct Node<T> {
+    data: T,
+    next: *mut Node<T>,
+}
+
+impl<T> LockFreeStack<T> {
+    pub fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(ptr::null_mut()),
+            len: AtomicUsize::new(0),
+        }
+    }
+    
+    pub fn push(&self, item: T) {
+        let new_node = Box::into_raw(Box::new(Node {
+            data: item,
+            next: ptr::null_mut(),
+        }));
+        
+        loop {
+            let head = self.head.load(Ordering::Acquire);
+            
+            unsafe {
+                (*new_node).next = head;
+            }
+            
+            // Try to update head to point to new node
+            match self.head.compare_exchange_weak(
+                head,
+                new_node,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.len.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                Err(_) => {
+                    // Another thread modified head, retry
+                    continue;
+                }
+            }
+        }
+    }
+    
+    pub fn pop(&self) -> Option<T> {
+        loop {
+            let head = self.head.load(Ordering::Acquire);
+            if head.is_null() {
+                return None;
+            }
+            
+            let next = unsafe { (*head).next };
+            
+            // Try to update head to point to next node
+            match self.head.compare_exchange_weak(
+                head,
+                next,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.len.fetch_sub(1, Ordering::Relaxed);
+                    
+                    // SAFETY: We successfully removed the node from the list,
+                    // so we have exclusive ownership
+                    let node = unsafe { Box::from_raw(head) };
+                    return Some(node.data);
+                }
+                Err(_) => {
+                    // Another thread modified head, retry
+                    continue;
+                }
+            }
+        }
+    }
+    
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
+    }
+    
+    pub fn is_empty(&self) -> bool {
+        self.head.load(Ordering::Acquire).is_null()
+    }
+}
+
+impl<T> Drop for LockFreeStack<T> {
+    fn drop(&mut self) {
+        // Clean up remaining nodes
+        while self.pop().is_some() {}
+    }
+}
+
+// SAFETY: LockFreeStack uses atomic operations for thread safety
+unsafe impl<T: Send> Send for LockFreeStack<T> {}
+unsafe impl<T: Send> Sync for LockFreeStack<T> {}
+```
+
+### Memory Layout and Alignment
+```rust
+use std::mem;
+use std::ptr;
+
+/// A type that demonstrates safe handling of memory layout and alignment
+#[repr(C)]
+pub struct AlignedBuffer<T, const ALIGN: usize> {
+    _alignment: [u8; 0],
+    data: T,
+}
+
+impl<T, const ALIGN: usize> AlignedBuffer<T, ALIGN> {
+    pub fn new(data: T) -> Self {
+        // Compile-time assertion that ALIGN is a power of 2
+        const_assert!(ALIGN.is_power_of_two());
+        
+        Self {
+            _alignment: [],
+            data,
+        }
+    }
+    
+    pub fn as_ptr(&self) -> *const T {
+        &self.data as *const T
+    }
+    
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        &mut self.data as *mut T
+    }
+    
+    /// Check alignment at runtime
+    pub fn is_properly_aligned(&self) -> bool {
+        let ptr = self.as_ptr() as usize;
+        ptr % ALIGN == 0
+    }
+}
+
+/// Custom allocator for aligned memory
+pub struct AlignedAllocator<const ALIGN: usize>;
+
+impl<const ALIGN: usize> AlignedAllocator<ALIGN> {
+    /// Allocate aligned memory for type T
+    /// 
+    /// # Safety
+    /// 
+    /// The returned pointer must be deallocated with `deallocate_aligned`
+    /// using the same alignment and layout parameters.
+    pub unsafe fn allocate_aligned<T>() -> Result<*mut T, std::alloc::AllocError> {
+        let layout = std::alloc::Layout::from_size_align(
+            mem::size_of::<T>(),
+            ALIGN.max(mem::align_of::<T>())
+        ).map_err(|_| std::alloc::AllocError)?;
+        
+        let ptr = std::alloc::alloc(layout) as *mut T;
+        if ptr.is_null() {
+            Err(std::alloc::AllocError)
+        } else {
+            Ok(ptr)
+        }
+    }
+    
+    /// Deallocate aligned memory
+    /// 
+    /// # Safety
+    /// 
+    /// - `ptr` must have been allocated by `allocate_aligned`
+    /// - `ptr` must not be used after this call
+    /// - This function must be called exactly once for each allocation
+    pub unsafe fn deallocate_aligned<T>(ptr: *mut T) {
+        if !ptr.is_null() {
+            let layout = std::alloc::Layout::from_size_align_unchecked(
+                mem::size_of::<T>(),
+                ALIGN.max(mem::align_of::<T>())
+            );
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
+}
+
+// Compile-time assertion macro
+macro_rules! const_assert {
+    ($condition:expr) => {
+        const _: () = assert!($condition);
+    };
+}
+
+use const_assert;
+```
+
+## Exceptions
+
+- Performance-critical code may require more unsafe operations
+- FFI boundaries inherently require unsafe code
+- Some algorithms (like lock-free data structures) need unsafe for correctness
+- Platform-specific code may need unsafe for system calls
+- Memory allocators and containers may need extensive unsafe code
+
+## Anti-Patterns to Avoid
+
+```rust
+// Avoid: Unnecessary unsafe blocks
+fn bad_unnecessary_unsafe() {
+    unsafe {
+        let x = 5; // No unsafe operation needed
+        println!("{}", x);
+    }
+}
+
+// Avoid: Unclear safety documentation
+unsafe fn bad_undocumented_function(ptr: *mut i32) {
+    // What are the safety requirements?
+    *ptr = 42;
+}
+
+// Avoid: Exposing raw pointers in public APIs
+pub fn bad_raw_pointer_api() -> *mut i32 {
+    // Callers can't verify safety
+    Box::into_raw(Box::new(42))
+}
+
+// Avoid: Transmuting without size/alignment checks
+fn bad_transmute<T, U>(value: T) -> U {
+    unsafe {
+        std::mem::transmute(value) // May have different sizes!
+    }
+}
+
+// Avoid: Ignoring alignment requirements
+fn bad_alignment(data: &[u8]) -> &u64 {
+    unsafe {
+        &*(data.as_ptr() as *const u64) // data might not be aligned!
+    }
+}
+```
+
+## Safety Guidelines
+
+### Documentation Requirements
+- Document all preconditions and postconditions
+- Explain why unsafe code is necessary
+- Document all safety invariants that must be maintained
+- Provide examples of correct usage
+- List potential undefined behaviors if misused
+
+### Testing Unsafe Code
+- Use Miri to detect undefined behavior
+- Test with different pointer alignments
+- Test boundary conditions more thoroughly
+- Use AddressSanitizer and Valgrind when available
+- Write property-based tests for invariants
+
+### Code Review Checklist
+- [ ] Is unsafe code minimized and isolated?
+- [ ] Are all safety requirements documented?
+- [ ] Are pointer arithmetic operations bounds-checked?
+- [ ] Are alignment requirements satisfied?
+- [ ] Are lifetime guarantees maintained?
+- [ ] Is thread safety properly handled?
+- [ ] Are all error conditions handled?
+- [ ] Is the public API safe to use?
+
+## Tools for Unsafe Code
+
+- `cargo miri` for undefined behavior detection
+- `cargo valgrind` for memory error detection
+- `cargo asan` for address sanitization
+- `cargo careful` for additional runtime checks
+- Static analysis tools like `cargo audit`
+- Formal verification tools when applicable

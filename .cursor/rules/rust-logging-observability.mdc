@@ -3,3 +3,605 @@ description:
 globs:
 alwaysApply: false
 ---
+# Rust Logging and Observability
+
+## Purpose
+Establish best practices for logging, tracing, metrics, and observability in Rust applications.
+
+## Requirements
+
+### Logging Framework
+- Use `tracing` crate for structured logging and distributed tracing
+- Prefer `tracing` over `log` for new applications
+- Use structured logging with key-value pairs
+- Implement proper log levels (trace, debug, info, warn, error)
+- Use `tracing-subscriber` for log output configuration
+
+### Observability Setup
+- Implement distributed tracing with OpenTelemetry
+- Use metrics collection with Prometheus-compatible libraries
+- Set up health checks and readiness probes
+- Implement proper error tracking and alerting
+- Use correlation IDs for request tracking
+
+### Log Security and Performance
+- Never log sensitive data (passwords, tokens, PII)
+- Use async logging to avoid blocking operations
+- Implement log rotation and retention policies
+- Filter logs appropriately in production
+- Use sampling for high-volume tracing
+
+### Instrumentation Best Practices
+- Instrument public API functions and critical paths
+- Add spans for database operations and external API calls
+- Include context information in error logs
+- Use counters and histograms for business metrics
+- Implement custom metrics for domain-specific events
+
+## Examples
+
+### Basic Tracing Setup
+```rust
+use tracing::{debug, error, info, warn, instrument, Span};
+use tracing_subscriber::{
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+    EnvFilter,
+    Registry,
+};
+
+// Application initialization
+fn init_tracing() -> Result<(), Box<dyn std::error::Error>> {
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info"))
+        .unwrap();
+
+    let formatting_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_file(true)
+        .with_line_number(true)
+        .json(); // Use JSON format for production
+
+    Registry::default()
+        .with(filter)
+        .with(formatting_layer)
+        .init();
+
+    Ok(())
+}
+
+// Service-level instrumentation
+#[instrument(skip(db), fields(user_id = %user_id))]
+async fn get_user_profile(
+    db: &Database,
+    user_id: UserId,
+) -> Result<UserProfile, ServiceError> {
+    info!("Fetching user profile");
+    
+    let user = db.get_user(user_id).await
+        .map_err(|e| {
+            error!(error = %e, "Failed to fetch user from database");
+            ServiceError::Database(e)
+        })?;
+    
+    let profile = build_user_profile(user).await?;
+    
+    info!(
+        profile_size = profile.sections.len(),
+        "Successfully built user profile"
+    );
+    
+    Ok(profile)
+}
+
+// Function with custom span
+async fn process_payment(payment_request: PaymentRequest) -> Result<PaymentResult, PaymentError> {
+    let span = tracing::info_span!(
+        "process_payment",
+        payment_id = %payment_request.id(),
+        amount = %payment_request.amount(),
+        currency = %payment_request.currency(),
+    );
+    
+    async move {
+        debug!("Validating payment request");
+        validate_payment_request(&payment_request)?;
+        
+        debug!("Calling payment processor");
+        let result = call_payment_processor(&payment_request).await?;
+        
+        info!(
+            transaction_id = %result.transaction_id(),
+            status = %result.status(),
+            "Payment processed successfully"
+        );
+        
+        Ok(result)
+    }.instrument(span).await
+}
+```
+
+### OpenTelemetry Integration
+```rust
+use opentelemetry::{global, trace::TracerProvider, KeyValue};
+use opentelemetry_jaeger::new_agent_pipeline;
+use opentelemetry_prometheus::PrometheusExporter;
+use tracing_opentelemetry::OpenTelemetryLayer;
+
+// Set up distributed tracing
+async fn init_observability() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize Jaeger tracer
+    let tracer = new_agent_pipeline()
+        .with_service_name("groundhog-service")
+        .with_tags(vec![
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+            KeyValue::new("service.environment", get_environment()),
+        ])
+        .install_simple()?;
+
+    // Set up metrics exporter
+    let prometheus = PrometheusExporter::builder()
+        .with_default_histogram_boundaries(vec![
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0
+        ])
+        .init();
+
+    // Configure tracing subscriber with OpenTelemetry
+    let opentelemetry_layer = OpenTelemetryLayer::new(tracer);
+    
+    tracing_subscriber::registry()
+        .with(opentelemetry_layer)
+        .with(tracing_subscriber::fmt::layer().json())
+        .with(EnvFilter::from_default_env())
+        .init();
+
+    global::set_meter_provider(prometheus.meter_provider().unwrap());
+    
+    Ok(())
+}
+
+// Shutdown tracing gracefully
+async fn shutdown_tracing() {
+    global::shutdown_tracer_provider();
+}
+```
+
+### Structured Logging Patterns
+```rust
+use serde_json::json;
+use tracing::{event, Level};
+
+// Log with structured context
+#[instrument(fields(
+    user_id = %user_id,
+    operation = "user_login",
+    client_ip = tracing::field::Empty,
+))]
+async fn handle_user_login(
+    user_id: UserId,
+    credentials: UserCredentials,
+    request_info: RequestInfo,
+) -> Result<LoginResult, AuthError> {
+    // Add dynamic fields to the span
+    Span::current().record("client_ip", &request_info.client_ip.to_string());
+    
+    // Structured logging with context
+    info!(
+        user_agent = %request_info.user_agent,
+        "User login attempt"
+    );
+    
+    match authenticate_user(&credentials).await {
+        Ok(session) => {
+            info!(
+                session_id = %session.id(),
+                expires_at = %session.expires_at(),
+                "Login successful"
+            );
+            Ok(LoginResult::Success(session))
+        },
+        Err(AuthError::InvalidCredentials) => {
+            warn!("Login failed: invalid credentials");
+            Ok(LoginResult::Failed)
+        },
+        Err(e) => {
+            error!(
+                error = %e,
+                error_code = ?e.code(),
+                "Login failed due to system error"
+            );
+            Err(e)
+        }
+    }
+}
+
+// Security-conscious logging
+fn log_security_event(event_type: SecurityEventType, details: SecurityEventDetails) {
+    // Never log sensitive data
+    let sanitized_details = details.sanitize();
+    
+    event!(
+        Level::WARN,
+        event_type = %event_type,
+        timestamp = %chrono::Utc::now(),
+        details = ?sanitized_details,
+        "Security event detected"
+    );
+}
+
+// Business metrics logging
+#[instrument(skip(metrics))]
+async fn process_order(order: Order, metrics: &MetricsCollector) -> Result<OrderResult, OrderError> {
+    let timer = metrics.start_timer("order_processing_duration");
+    
+    let result = async {
+        validate_order(&order).await?;
+        let processed_order = apply_business_rules(order).await?;
+        save_order(&processed_order).await?;
+        
+        // Log business metrics
+        metrics.increment_counter("orders_processed_total", &[
+            ("product_type", processed_order.product_type()),
+            ("customer_tier", processed_order.customer_tier()),
+        ]);
+        
+        metrics.record_value("order_value", processed_order.total_value());
+        
+        info!(
+            order_id = %processed_order.id(),
+            total_value = %processed_order.total_value(),
+            items_count = processed_order.items().len(),
+            "Order processed successfully"
+        );
+        
+        Ok(OrderResult::Processed(processed_order))
+    }.await;
+    
+    timer.finish();
+    
+    result
+}
+```
+
+### Error Tracking and Correlation
+```rust
+use uuid::Uuid;
+use std::collections::HashMap;
+
+// Request correlation middleware
+#[derive(Clone)]
+pub struct CorrelationId(String);
+
+impl CorrelationId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+    
+    pub fn from_header(value: &str) -> Self {
+        Self(value.to_string())
+    }
+    
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+// Middleware to add correlation ID to all spans
+#[instrument(skip_all, fields(correlation_id = %correlation_id.as_str()))]
+async fn handle_request<F, T>(
+    correlation_id: CorrelationId,
+    handler: F,
+) -> Result<T, RequestError>
+where
+    F: Future<Output = Result<T, RequestError>>,
+{
+    info!("Processing request");
+    
+    let result = handler.await;
+    
+    match &result {
+        Ok(_) => info!("Request completed successfully"),
+        Err(e) => error!(
+            error = %e,
+            error_type = ?std::mem::discriminant(e),
+            "Request failed"
+        ),
+    }
+    
+    result
+}
+
+// Error context preservation
+#[derive(Debug, thiserror::Error)]
+pub enum ServiceError {
+    #[error("Database error: {source}")]
+    Database {
+        #[source]
+        source: DatabaseError,
+        correlation_id: String,
+        operation: String,
+    },
+    
+    #[error("Validation error: {message}")]
+    Validation {
+        message: String,
+        field: String,
+        correlation_id: String,
+    },
+}
+
+impl ServiceError {
+    pub fn database(source: DatabaseError, operation: &str) -> Self {
+        let correlation_id = get_current_correlation_id();
+        error!(
+            error = %source,
+            operation = operation,
+            correlation_id = %correlation_id,
+            "Database operation failed"
+        );
+        
+        Self::Database {
+            source,
+            correlation_id,
+            operation: operation.to_string(),
+        }
+    }
+}
+```
+
+### Metrics and Health Checks
+```rust
+use prometheus::{Counter, Histogram, Gauge, register_counter, register_histogram, register_gauge};
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct ApplicationMetrics {
+    pub requests_total: Counter,
+    pub request_duration: Histogram,
+    pub active_connections: Gauge,
+    pub database_pool_size: Gauge,
+}
+
+impl ApplicationMetrics {
+    pub fn new() -> Result<Self, prometheus::Error> {
+        let requests_total = register_counter!(
+            "http_requests_total",
+            "Total number of HTTP requests",
+            &["method", "endpoint", "status"]
+        )?;
+        
+        let request_duration = register_histogram!(
+            "http_request_duration_seconds",
+            "HTTP request duration in seconds",
+            vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+        )?;
+        
+        let active_connections = register_gauge!(
+            "active_connections",
+            "Number of active connections"
+        )?;
+        
+        let database_pool_size = register_gauge!(
+            "database_pool_size",
+            "Current database connection pool size"
+        )?;
+        
+        Ok(Self {
+            requests_total,
+            request_duration,
+            active_connections,
+            database_pool_size,
+        })
+    }
+}
+
+// Health check implementation
+#[derive(serde::Serialize)]
+pub struct HealthStatus {
+    pub status: String,
+    pub version: String,
+    pub checks: HashMap<String, ComponentHealth>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ComponentHealth {
+    pub status: String,
+    pub message: Option<String>,
+    pub details: Option<serde_json::Value>,
+}
+
+#[instrument]
+pub async fn health_check(
+    database: &Database,
+    cache: &Cache,
+) -> Result<HealthStatus, HealthCheckError> {
+    let mut checks = HashMap::new();
+    
+    // Database health check
+    let db_health = match database.ping().await {
+        Ok(_) => {
+            debug!("Database health check passed");
+            ComponentHealth {
+                status: "healthy".to_string(),
+                message: None,
+                details: Some(json!({
+                    "connection_pool_size": database.pool_size(),
+                    "active_connections": database.active_connections(),
+                })),
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, "Database health check failed");
+            ComponentHealth {
+                status: "unhealthy".to_string(),
+                message: Some(e.to_string()),
+                details: None,
+            }
+        }
+    };
+    checks.insert("database".to_string(), db_health);
+    
+    // Cache health check
+    let cache_health = match cache.ping().await {
+        Ok(_) => ComponentHealth {
+            status: "healthy".to_string(),
+            message: None,
+            details: None,
+        },
+        Err(e) => {
+            warn!(error = %e, "Cache health check failed");
+            ComponentHealth {
+                status: "unhealthy".to_string(),
+                message: Some(e.to_string()),
+                details: None,
+            }
+        }
+    };
+    checks.insert("cache".to_string(), cache_health);
+    
+    let overall_status = if checks.values().all(|h| h.status == "healthy") {
+        "healthy"
+    } else {
+        "unhealthy"
+    };
+    
+    info!(
+        status = overall_status,
+        components_checked = checks.len(),
+        "Health check completed"
+    );
+    
+    Ok(HealthStatus {
+        status: overall_status.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        checks,
+    })
+}
+```
+
+### Development vs Production Configuration
+```rust
+// Development configuration
+#[cfg(debug_assertions)]
+fn init_development_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter("debug")
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_target(true)
+        .pretty()
+        .init();
+}
+
+// Production configuration
+#[cfg(not(debug_assertions))]
+fn init_production_tracing() -> Result<(), Box<dyn std::error::Error>> {
+    let formatting_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_file(false)
+        .with_line_number(false)
+        .json();
+    
+    let filter = EnvFilter::from_default_env();
+    
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(formatting_layer)
+        .init();
+    
+    Ok(())
+}
+
+// Environment-aware configuration
+fn get_log_config() -> LogConfig {
+    match std::env::var("ENVIRONMENT").as_deref() {
+        Ok("production") => LogConfig {
+            level: "info",
+            format: LogFormat::Json,
+            include_file_info: false,
+            sampling_rate: 0.1, // Sample 10% of traces
+        },
+        Ok("staging") => LogConfig {
+            level: "debug",
+            format: LogFormat::Json,
+            include_file_info: true,
+            sampling_rate: 0.5,
+        },
+        _ => LogConfig {
+            level: "debug",
+            format: LogFormat::Pretty,
+            include_file_info: true,
+            sampling_rate: 1.0, // All traces in development
+        },
+    }
+}
+```
+
+## Security Considerations
+
+### Sensitive Data Handling
+```rust
+use serde::Serialize;
+
+// Safe logging of user data
+#[derive(Debug, Serialize)]
+struct SafeUserInfo {
+    user_id: UserId,
+    email_domain: String,  // Only domain, not full email
+    role: UserRole,
+    created_at: chrono::DateTime<chrono::Utc>,
+    // Never include: password, tokens, full email, etc.
+}
+
+impl From<&User> for SafeUserInfo {
+    fn from(user: &User) -> Self {
+        let email_domain = user.email()
+            .split('@')
+            .nth(1)
+            .unwrap_or("unknown")
+            .to_string();
+            
+        Self {
+            user_id: user.id(),
+            email_domain,
+            role: user.role(),
+            created_at: user.created_at(),
+        }
+    }
+}
+
+// Secure error logging
+#[instrument(fields(user_info = ?SafeUserInfo::from(&user)))]
+async fn process_user_data(user: &User) -> Result<ProcessResult, ProcessError> {
+    // Safe to log user info this way
+    info!("Processing user data");
+    
+    // ... processing logic
+    
+    Ok(ProcessResult::Success)
+}
+```
+
+## Best Practices Summary
+
+1. **Use Structured Logging**: Include context with key-value pairs
+2. **Implement Distributed Tracing**: For microservices and complex flows
+3. **Security First**: Never log sensitive information
+4. **Performance Aware**: Use async logging and appropriate sampling
+5. **Environment Specific**: Different configs for dev/staging/prod
+6. **Correlation IDs**: Track requests across service boundaries
+7. **Health Checks**: Monitor service and dependency health
+8. **Metrics Collection**: Track business and technical metrics
+9. **Error Context**: Preserve error context through the call stack
+10. **Graceful Degradation**: Handle logging failures without crashing
+
+## Anti-Patterns to Avoid
+
+- Logging sensitive data (passwords, tokens, PII)
+- Blocking the application with synchronous logging
+- Over-logging in production (performance impact)
+- Under-logging errors and important events
+- Not using correlation IDs for request tracking
+- Inconsistent log formats across services
+- Not implementing proper log retention policies

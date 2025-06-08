@@ -3,3 +3,424 @@ description:
 globs:
 alwaysApply: false
 ---
+# Rust Module Organization
+
+## Purpose
+Define best practices for organizing Rust code into modules, crates, and workspaces.
+
+## Requirements
+
+### Crate Structure
+- Use `lib.rs` for library crates, `main.rs` for binary crates
+- Organize code into logical modules based on functionality, not implementation
+- Use `mod.rs` files for complex modules with multiple sub-modules
+- Implement `prelude.rs` for commonly used types and traits
+- Use `error.rs` for centralized error handling types
+
+### Module Hierarchy
+- Keep module depth reasonable (max 3-4 levels)
+- Use descriptive module names that reflect their purpose
+- Group related functionality in the same module
+- Separate public API from internal implementation
+- Use `pub(crate)` for internal APIs that need to be shared across modules
+
+### Visibility Rules
+- Default to private - only make items public when necessary
+- Use `pub(in path)` for fine-grained visibility control
+- Document public APIs thoroughly
+- Keep implementation details private
+- Use `#[doc(hidden)]` for public items that are not part of the stable API
+
+### Workspace Organization
+- Use workspaces for projects with multiple related crates
+- Separate binary and library crates appropriately
+- Share common dependencies through workspace-level `Cargo.toml`
+- Use path dependencies for workspace members
+- Implement consistent versioning across workspace crates
+
+## Examples
+
+### Basic Crate Structure
+```rust
+// lib.rs - Library root
+//! Groundhog application library
+//! 
+//! This crate provides the core functionality for the Groundhog application.
+
+// Re-export commonly used types
+pub use error::{Error, Result};
+pub use config::Config;
+
+// Public modules
+pub mod config;
+pub mod database;
+pub mod models;
+pub mod processing;
+
+// Internal modules
+mod error;
+mod utils;
+
+// Prelude for convenience
+pub mod prelude {
+    pub use crate::{
+        Config,
+        Error,
+        Result,
+        models::{User, Task, Project},
+        processing::ProcessingOptions,
+    };
+}
+```
+
+### Module with Sub-modules
+```rust
+// models/mod.rs - Module with sub-modules
+pub mod user;
+pub mod task;
+pub mod project;
+
+// Re-export commonly used types
+pub use user::{User, UserId, UserRole};
+pub use task::{Task, TaskId, TaskStatus};
+pub use project::{Project, ProjectId};
+
+// Internal types not exported
+mod validation;
+
+// Common traits for all models
+pub trait Entity {
+    type Id;
+    fn id(&self) -> &Self::Id;
+}
+
+pub trait Timestamped {
+    fn created_at(&self) -> chrono::DateTime<chrono::Utc>;
+    fn updated_at(&self) -> Option<chrono::DateTime<chrono::Utc>>;
+}
+```
+
+### Visibility Control Examples
+```rust
+// config/mod.rs
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Config {
+    pub database: DatabaseConfig,
+    pub server: ServerConfig,
+    // Internal configuration not exposed
+    pub(crate) internal: InternalConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DatabaseConfig {
+    pub url: String,
+    pub max_connections: u32,
+    // Only visible within the config module
+    pub(in crate::config) connection_timeout: std::time::Duration,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+// Internal configuration - not part of public API
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct InternalConfig {
+    debug_mode: bool,
+    log_level: String,
+}
+
+impl Config {
+    pub fn load() -> crate::Result<Self> {
+        // Implementation
+    }
+    
+    // Helper method only for this module
+    fn validate(&self) -> crate::Result<()> {
+        // Validation logic
+    }
+    
+    // Public method that uses internal state
+    pub fn is_development(&self) -> bool {
+        self.internal.debug_mode
+    }
+}
+```
+
+### Error Module Organization
+```rust
+// error.rs - Centralized error handling
+use thiserror::Error;
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Configuration error")]
+    Config(#[from] ConfigError),
+    
+    #[error("Database error")]
+    Database(#[from] DatabaseError),
+    
+    #[error("Processing error")]
+    Processing(#[from] ProcessingError),
+    
+    #[error("I/O error")]
+    Io(#[from] std::io::Error),
+    
+    #[error("Serialization error")]
+    Serialization(#[from] serde_json::Error),
+}
+
+#[derive(Error, Debug)]
+pub enum ConfigError {
+    #[error("Missing required field: {field}")]
+    MissingField { field: String },
+    
+    #[error("Invalid value for {field}: {value}")]
+    InvalidValue { field: String, value: String },
+}
+
+#[derive(Error, Debug)]
+pub enum DatabaseError {
+    #[error("Connection failed: {source}")]
+    Connection { source: String },
+    
+    #[error("Query failed: {query}")]
+    Query { query: String },
+    
+    #[error("Migration failed: {version}")]
+    Migration { version: String },
+}
+
+#[derive(Error, Debug)]
+pub enum ProcessingError {
+    #[error("Invalid input: {message}")]
+    InvalidInput { message: String },
+    
+    #[error("Processing timeout after {seconds}s")]
+    Timeout { seconds: u64 },
+}
+```
+
+### Workspace Configuration
+```toml
+# Cargo.toml - Workspace root
+[workspace]
+members = [
+    "groundhog-lib",
+    "groundhog-cli",
+    "groundhog-server",
+    "groundhog-shared",
+]
+
+# Shared dependencies
+[workspace.dependencies]
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+
+# groundhog-lib/Cargo.toml
+[package]
+name = "groundhog-lib"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+groundhog-shared = { path = "../groundhog-shared" }
+tokio = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# groundhog-cli/Cargo.toml
+[package]
+name = "groundhog-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "groundhog"
+path = "src/main.rs"
+
+[dependencies]
+groundhog-lib = { path = "../groundhog-lib" }
+groundhog-shared = { path = "../groundhog-shared" }
+clap = { version = "4.0", features = ["derive"] }
+tokio = { workspace = true }
+```
+
+### Feature-Based Module Organization
+```rust
+// features/mod.rs - Organize by features/capabilities
+pub mod authentication;
+pub mod authorization;
+pub mod user_management;
+pub mod task_management;
+pub mod reporting;
+
+// Each feature module exposes a clean API
+pub use authentication::AuthService;
+pub use authorization::AuthzService;
+pub use user_management::UserService;
+pub use task_management::TaskService;
+pub use reporting::ReportService;
+
+// Common types used across features
+pub mod common {
+    pub use crate::models::{User, Task, Project};
+    pub use crate::error::{Error, Result};
+    pub use crate::config::Config;
+}
+```
+
+### Testing Module Organization
+```rust
+// lib.rs - Test organization
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    // Unit tests for this module
+    mod unit_tests {
+        use super::*;
+        
+        #[test]
+        fn test_basic_functionality() {
+            // Test implementation
+        }
+    }
+    
+    // Integration tests
+    mod integration_tests {
+        use super::*;
+        
+        #[tokio::test]
+        async fn test_full_workflow() {
+            // Integration test implementation
+        }
+    }
+    
+    // Test utilities
+    mod test_utils {
+        use super::*;
+        
+        pub fn create_test_config() -> Config {
+            // Test configuration setup
+        }
+        
+        pub async fn setup_test_database() -> Database {
+            // Test database setup
+        }
+    }
+}
+
+// tests/common/mod.rs - Shared test utilities
+pub mod fixtures;
+pub mod helpers;
+
+pub use fixtures::*;
+pub use helpers::*;
+
+// tests/integration_test.rs - Integration tests
+mod common;
+
+use common::*;
+use groundhog_lib::*;
+
+#[tokio::test]
+async fn test_end_to_end_workflow() {
+    let config = create_test_config();
+    let app = setup_test_app(config).await;
+    
+    // Test implementation
+}
+```
+
+## Anti-Patterns to Avoid
+
+### Overly Deep Module Hierarchies
+```rust
+// Avoid: Too deep nesting
+mod features {
+    mod user_management {
+        mod authentication {
+            mod providers {
+                mod oauth {
+                    mod google {
+                        // Too deep!
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Better: Flatter structure
+mod auth {
+    mod providers;
+    mod oauth;
+    mod google;
+}
+```
+
+### Circular Dependencies
+```rust
+// Avoid: Circular dependencies between modules
+mod user {
+    use crate::task::Task; // user depends on task
+    
+    pub struct User {
+        tasks: Vec<Task>,
+    }
+}
+
+mod task {
+    use crate::user::User; // task depends on user - circular!
+    
+    pub struct Task {
+        owner: User,
+    }
+}
+
+// Better: Use IDs or separate the common types
+mod models {
+    pub type UserId = u64;
+    pub type TaskId = u64;
+}
+
+mod user {
+    use crate::models::{UserId, TaskId};
+    
+    pub struct User {
+        id: UserId,
+        task_ids: Vec<TaskId>,
+    }
+}
+
+mod task {
+    use crate::models::{UserId, TaskId};
+    
+    pub struct Task {
+        id: TaskId,
+        owner_id: UserId,
+    }
+}
+```
+
+## Best Practices Summary
+
+1. **Start Simple**: Begin with flat structure, refactor as code grows
+2. **Group by Functionality**: Not by technical layers
+3. **Minimize Public Surface**: Keep implementation details private
+4. **Use Workspaces**: For multi-crate projects
+5. **Document Module Purpose**: Each module should have clear responsibility
+6. **Test Organization**: Mirror source structure in tests
+7. **Avoid Circular Dependencies**: Use IDs or extract common types
+8. **Feature Flags**: Use Cargo features for optional functionality

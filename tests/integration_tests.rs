@@ -37,7 +37,7 @@ fn test_explain_command_basic() {
 #[test]
 fn test_explain_command_with_topic() {
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["explain", "--topic", "rust"])
+    cmd.args(["explain", "--topic", "rust"])
         .assert()
         .success()
         .stdout("hello world - explaining: rust\n");
@@ -47,7 +47,7 @@ fn test_explain_command_with_topic() {
 #[test]
 fn test_verbose_logging() {
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["-v", "explain"])
+    cmd.args(["-v", "explain"])
         .assert()
         .success()
         .stderr(predicate::str::contains("Starting groundhog application"))
@@ -59,7 +59,7 @@ fn test_verbose_logging() {
 #[test]
 fn test_very_verbose_logging() {
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["-vv", "explain"])
+    cmd.args(["-vv", "explain"])
         .assert()
         .success()
         .stderr(predicate::str::contains("Starting groundhog application"))
@@ -70,7 +70,7 @@ fn test_very_verbose_logging() {
 #[test]
 fn test_quiet_mode() {
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["-q", "explain"])
+    cmd.args(["-q", "explain"])
         .assert()
         .success()
         .stdout("hello world\n")
@@ -106,7 +106,7 @@ threads = 4
     fs::write(&config_path, config_content).unwrap();
     
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["--config", config_path.to_str().unwrap(), "explain"])
+    cmd.args(["--config", config_path.to_str().unwrap(), "explain"])
         .assert()
         .success()
         .stdout("hello world\n");
@@ -135,7 +135,7 @@ fn test_missing_subcommand() {
 #[test]
 fn test_explain_help() {
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["explain", "--help"])
+    cmd.args(["explain", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Provides explanations and demonstrations"));
@@ -145,7 +145,7 @@ fn test_explain_help() {
 #[test]
 fn test_multiple_verbosity_flags() {
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["-vvv", "explain"])
+    cmd.args(["-vvv", "explain"])
         .assert()
         .success()
         .stdout("hello world\n");
@@ -156,7 +156,7 @@ fn test_multiple_verbosity_flags() {
 fn test_quiet_and_verbose_flags() {
     // Quiet should take precedence or this should be an error
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["-q", "-v", "explain"])
+    cmd.args(["-q", "-v", "explain"])
         .assert()
         .success() // Currently this succeeds, quiet takes precedence
         .stdout("hello world\n");
@@ -194,7 +194,7 @@ fn test_config_file_creation() {
     
     // First, test that the application works without a config file
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["--config", config_path.to_str().unwrap(), "explain"])
+    cmd.args(["--config", config_path.to_str().unwrap(), "explain"])
         .assert()
         .success()
         .stdout("hello world\n");
@@ -210,7 +210,7 @@ fn test_invalid_config_file() {
     fs::write(&config_path, "invalid toml content [[[").unwrap();
     
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["--config", config_path.to_str().unwrap(), "explain"])
+    cmd.args(["--config", config_path.to_str().unwrap(), "explain"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("error:"));
@@ -220,7 +220,7 @@ fn test_invalid_config_file() {
 #[test]
 fn test_long_form_flags() {
     let mut cmd = Command::cargo_bin("groundhog").unwrap();
-    cmd.args(&["--verbose", "--verbose", "explain"])
+    cmd.args(["--verbose", "--verbose", "explain"])
         .assert()
         .success()
         .stdout("hello world\n")

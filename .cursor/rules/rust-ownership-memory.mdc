@@ -1,5 +1,213 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
+# Rust Ownership and Memory Management
+
+## Purpose
+Define best practices for Rust's ownership system, borrowing, lifetimes, and memory management to prevent common pitfalls and write efficient, safe code.
+
+## Requirements
+
+### Ownership Patterns
+- Prefer moving ownership when data won't be needed by the caller
+- Use borrowing (`&T`) when you only need read access
+- Use mutable borrowing (`&mut T`) sparingly and only when necessary
+- Avoid multiple mutable borrows or mixing mutable and immutable borrows
+- Use `Cow<T>` for functions that might need to modify borrowed data
+
+### Lifetime Management
+- Keep lifetimes as short as possible
+- Use lifetime elision rules when compiler can infer lifetimes
+- Prefer `'static` lifetimes only for truly global data
+- Use lifetime parameters only when necessary for clarity
+- Avoid complex lifetime relationships that make code hard to understand
+
+### Smart Pointer Usage
+- Use `Box<T>` for heap allocation when ownership is clear
+- Use `Rc<T>` for shared ownership in single-threaded contexts
+- Use `Arc<T>` for shared ownership across threads
+- Use `RefCell<T>` for interior mutability in single-threaded code
+- Use `Mutex<T>` or `RwLock<T>` for thread-safe interior mutability
+
+### Memory Optimization
+- Prefer stack allocation over heap allocation when possible
+- Use `Vec::with_capacity()` when final size is known
+- Consider `SmallVec` for collections that are usually small
+- Use `&str` instead of `String` for function parameters when possible
+- Minimize cloning with strategic use of references
+
+## Examples
+
+### Ownership Transfer vs Borrowing
+```rust
+// Good: Transfer ownership when caller doesn't need the data
+fn process_data(data: Vec<String>) -> ProcessedData {
+    // Process and consume data
+    ProcessedData::from(data)
+}
+
+// Good: Borrow when you only need to read
+fn analyze_data(data: &[String]) -> Analysis {
+    data.iter().map(|s| s.len()).collect()
+}
+
+// Good: Mutable borrow when you need to modify
+fn normalize_data(data: &mut Vec<String>) {
+    for item in data.iter_mut() {
+        *item = item.to_lowercase();
+    }
+}
+```
+
+### Smart Pointer Patterns
+```rust
+use std::rc::Rc;
+use std::sync::Arc;
+use std::cell::RefCell;
+
+// Good: Shared ownership in single-threaded context
+fn share_config() -> (Rc<Config>, Rc<Config>) {
+    let config = Rc::new(Config::load());
+    (config.clone(), config)
+}
+
+// Good: Thread-safe shared ownership
+fn share_across_threads() -> Arc<Config> {
+    Arc::new(Config::load())
+}
+
+// Good: Interior mutability when needed
+struct Cache {
+    data: RefCell<HashMap<String, String>>,
+}
+
+impl Cache {
+    fn get(&self, key: &str) -> Option<String> {
+        self.data.borrow().get(key).cloned()
+    }
+    
+    fn insert(&self, key: String, value: String) {
+        self.data.borrow_mut().insert(key, value);
+    }
+}
+```
+
+### Lifetime Annotations
+```rust
+// Good: Simple lifetime elision
+fn first_word(s: &str) -> &str {
+    s.split_whitespace().next().unwrap_or("")
+}
+
+// Good: Explicit lifetimes when necessary
+fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
+    if x.len() > y.len() { x } else { y }
+}
+
+// Good: Struct with lifetime parameters
+struct Parser<'a> {
+    input: &'a str,
+    position: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, position: 0 }
+    }
+}
+```
+
+### Copy vs Clone Strategy
+```rust
+// Good: Implement Copy for small, simple types
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+// Good: Implement Clone for larger types
+#[derive(Debug, Clone)]
+struct ComplexData {
+    values: Vec<f64>,
+    metadata: HashMap<String, String>,
+}
+
+// Good: Strategic cloning
+fn process_items(items: &[Item]) -> Vec<ProcessedItem> {
+    items
+        .iter()
+        .filter(|item| item.is_valid())
+        .map(|item| ProcessedItem::from(item)) // Avoid clone here
+        .collect()
+}
+```
+
+### Memory-Efficient Patterns
+```rust
+// Good: Pre-allocate when size is known
+fn collect_results(count: usize) -> Vec<Result<String, Error>> {
+    let mut results = Vec::with_capacity(count);
+    for i in 0..count {
+        results.push(process_item(i));
+    }
+    results
+}
+
+// Good: Use iterators to avoid intermediate allocations
+fn process_numbers(numbers: &[i32]) -> Vec<i32> {
+    numbers
+        .iter()
+        .filter(|&&n| n > 0)
+        .map(|&n| n * 2)
+        .collect()
+}
+
+// Good: String slice parameters
+fn log_message(level: &str, message: &str) {
+    println!("[{}] {}", level, message);
+}
+```
+
+## Exceptions
+
+- Clone is acceptable in prototypes and when performance isn't critical
+- `unwrap()` is acceptable when you've proven the operation cannot fail
+- Interior mutability patterns are acceptable when needed for API design
+- Lifetime annotations can be verbose if they improve API clarity
+- `unsafe` code may require different ownership patterns (see rust-unsafe.mdc)
+
+## Performance Considerations
+
+- Prefer `&str` over `String` for function parameters
+- Use `Cow<str>` when you might need to own or borrow
+- Consider `bytes` crate for binary data processing
+- Use `smallvec` for collections that are usually small
+- Profile before optimizing complex ownership patterns
+
+## Anti-Patterns to Avoid
+
+```rust
+// Avoid: Unnecessary cloning
+fn bad_process(data: &Vec<String>) -> Vec<String> {
+    data.clone() // Expensive and usually unnecessary
+}
+
+// Avoid: Fighting the borrow checker with RefCell everywhere
+struct BadDesign {
+    field1: RefCell<String>,
+    field2: RefCell<Vec<i32>>,
+    field3: RefCell<HashMap<String, String>>,
+}
+
+// Avoid: Complex lifetime relationships
+fn bad_lifetimes<'a, 'b, 'c>(
+    x: &'a str, 
+    y: &'b str, 
+    z: &'c str
+) -> (&'a str, &'b str, &'c str) {
+    (x, y, z) // Overly complex for simple operations
+}
+```

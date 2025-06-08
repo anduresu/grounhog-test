@@ -3,3 +3,605 @@ description:
 globs:
 alwaysApply: false
 ---
+# Rust Ecosystem Integration
+
+## Purpose
+Define best practices for integrating with the broader Rust ecosystem, including crate selection, dependency management, and community standards.
+
+## Requirements
+
+### Dependency Management
+- Use semantic versioning for all dependencies
+- Prefer widely-adopted, well-maintained crates
+- Minimize dependency footprint where possible
+- Use `cargo-audit` to check for security vulnerabilities
+- Implement proper feature flags for optional functionality
+
+### Crate Selection Criteria
+- Choose crates with active maintenance and good documentation
+- Prefer crates with high adoption rates and community trust
+- Evaluate API stability and breaking change history
+- Consider compile-time impact and binary size
+- Assess licensing compatibility with project requirements
+
+### Community Standards
+- Follow Rust API design guidelines
+- Implement common traits (Debug, Clone, PartialEq, etc.) appropriately
+- Use conventional error handling patterns
+- Follow naming conventions from the Rust standard library
+- Implement proper documentation with examples
+
+### Ecosystem Integration
+- Use `serde` for serialization with consistent field naming
+- Implement `clap` for CLI applications following conventions
+- Use `tokio` for async runtime with proper error handling
+- Integrate with `tracing` for observability
+- Follow HTTP client/server patterns with established crates
+
+## Examples
+
+### Recommended Core Dependencies
+```toml
+[dependencies]
+# Error handling
+anyhow = "1.0"              # Application error handling
+thiserror = "1.0"           # Library error types
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"          # JSON support
+toml = "0.8"               # TOML configuration
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# HTTP clients/servers
+reqwest = { version = "0.11", features = ["json"] }
+axum = "0.7"               # For web servers
+
+# CLI applications
+clap = { version = "4.0", features = ["derive"] }
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+# Testing
+proptest = "1.0"           # Property-based testing
+criterion = "0.5"          # Benchmarking
+
+# Utilities
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = { version = "2.0", features = ["serde"] }
+```
+
+### Serde Integration Patterns
+```rust
+use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
+
+// Good: Consistent field naming and validation
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct User {
+    pub id: UserId,
+    pub email: String,
+    pub display_name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: Option<DateTime<Utc>>,
+    
+    // Optional fields with defaults
+    #[serde(default)]
+    pub is_active: bool,
+    
+    // Skip serializing None values
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_login: Option<DateTime<Utc>>,
+    
+    // Custom serialization for sensitive data
+    #[serde(skip_serializing)]
+    pub password_hash: Option<String>,
+}
+
+// Custom deserializer for validation
+impl User {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if !is_valid_email(&self.email) {
+            return Err(ValidationError::InvalidEmail(self.email.clone()));
+        }
+        
+        if self.display_name.is_empty() {
+            return Err(ValidationError::EmptyDisplayName);
+        }
+        
+        Ok(())
+    }
+}
+
+// Integration with common validation patterns
+#[derive(Debug, Deserialize)]
+pub struct CreateUserRequest {
+    #[serde(deserialize_with = "validate_email")]
+    pub email: String,
+    
+    #[serde(deserialize_with = "validate_display_name")]
+    pub display_name: String,
+    
+    #[serde(deserialize_with = "validate_password")]
+    pub password: String,
+}
+
+fn validate_email<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let email = String::deserialize(deserializer)?;
+    if is_valid_email(&email) {
+        Ok(email)
+    } else {
+        Err(serde::de::Error::custom("Invalid email format"))
+    }
+}
+```
+
+### CLI Application Patterns with Clap
+```rust
+use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+#[command(propagate_version = true)]
+pub struct Cli {
+    /// Configuration file path
+    #[arg(short, long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+    
+    /// Verbose output
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+    
+    /// Output format
+    #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+    
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Create a new project
+    Create {
+        /// Project name
+        name: String,
+        
+        /// Project template
+        #[arg(short, long, value_enum, default_value_t = Template::Default)]
+        template: Template,
+        
+        /// Initialize git repository
+        #[arg(long)]
+        git: bool,
+    },
+    
+    /// Build the project
+    Build {
+        /// Build target
+        #[arg(short, long)]
+        target: Option<String>,
+        
+        /// Release build
+        #[arg(short, long)]
+        release: bool,
+    },
+    
+    /// Run tests
+    Test {
+        /// Test name filter
+        filter: Option<String>,
+        
+        /// Run ignored tests
+        #[arg(long)]
+        ignored: bool,
+    },
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+pub enum OutputFormat {
+    Text,
+    Json,
+    Yaml,
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+pub enum Template {
+    Default,
+    Library,
+    Binary,
+    WebService,
+}
+
+// Integration with tracing for CLI logging
+impl Cli {
+    pub fn init_logging(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let level = match self.verbose {
+            0 => "info",
+            1 => "debug", 
+            _ => "trace",
+        };
+        
+        tracing_subscriber::fmt()
+            .with_env_filter(level)
+            .with_target(false)
+            .init();
+        
+        Ok(())
+    }
+}
+```
+
+### Async Programming with Tokio
+```rust
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::{broadcast, mpsc, oneshot},
+    time::{interval, timeout, Duration},
+};
+use anyhow::Result;
+
+// Good: Structured async application
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize tracing
+    tracing_subscriber::fmt::init();
+    
+    // Load configuration
+    let config = load_config().await?;
+    
+    // Set up graceful shutdown
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+    
+    // Start services
+    let server_handle = tokio::spawn(run_server(config.server, shutdown_rx.resubscribe()));
+    let background_handle = tokio::spawn(run_background_tasks(config.tasks, shutdown_rx));
+    
+    // Wait for shutdown signal
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Received shutdown signal");
+        }
+        result = server_handle => {
+            tracing::error!("Server exited unexpectedly: {:?}", result);
+        }
+        result = background_handle => {
+            tracing::error!("Background tasks exited unexpectedly: {:?}", result);
+        }
+    }
+    
+    // Initiate graceful shutdown
+    shutdown_tx.send(())?;
+    
+    // Wait for services to stop
+    let _ = timeout(Duration::from_secs(30), async {
+        let _ = server_handle.await;
+        let _ = background_handle.await;
+    }).await;
+    
+    tracing::info!("Application shutdown complete");
+    Ok(())
+}
+
+// Service with proper error handling and observability
+async fn run_server(
+    config: ServerConfig,
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<()> {
+    let listener = TcpListener::bind(&config.address).await?;
+    tracing::info!("Server listening on {}", config.address);
+    
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, addr)) => {
+                        tracing::debug!("Accepted connection from {}", addr);
+                        tokio::spawn(handle_connection(stream));
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to accept connection: {}", e);
+                    }
+                }
+            }
+            _ = shutdown.recv() => {
+                tracing::info!("Server shutting down");
+                break;
+            }
+        }
+    }
+    
+    Ok(())
+}
+```
+
+### HTTP Client Integration with reqwest
+```rust
+use reqwest::{Client, header, Response};
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use anyhow::{Context, Result};
+
+// Good: Configured HTTP client with proper error handling
+pub struct ApiClient {
+    client: Client,
+    base_url: String,
+    api_key: String,
+}
+
+impl ApiClient {
+    pub fn new(base_url: String, api_key: String) -> Result<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent(format!("MyApp/{}", env!("CARGO_PKG_VERSION")))
+            .default_headers({
+                let mut headers = header::HeaderMap::new();
+                headers.insert(
+                    header::AUTHORIZATION,
+                    header::HeaderValue::from_str(&format!("Bearer {}", api_key))?
+                );
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("application/json")
+                );
+                headers
+            })
+            .build()
+            .context("Failed to create HTTP client")?;
+        
+        Ok(Self {
+            client,
+            base_url,
+            api_key,
+        })
+    }
+    
+    pub async fn get_user(&self, user_id: UserId) -> Result<User> {
+        let url = format!("{}/users/{}", self.base_url, user_id);
+        
+        let response = self.client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to send request")?;
+        
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "API request failed with status {}: {}",
+                status,
+                error_text
+            ));
+        }
+        
+        let user: User = response
+            .json()
+            .await
+            .context("Failed to parse response as JSON")?;
+        
+        Ok(user)
+    }
+    
+    pub async fn create_user(&self, request: CreateUserRequest) -> Result<User> {
+        let url = format!("{}/users", self.base_url);
+        
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send request")?;
+        
+        handle_api_response(response).await
+    }
+}
+
+// Reusable response handler
+async fn handle_api_response<T: for<'de> Deserialize<'de>>(response: Response) -> Result<T> {
+    let status = response.status();
+    
+    if status.is_success() {
+        response.json().await.context("Failed to parse JSON response")
+    } else {
+        let error: ApiError = response.json().await
+            .unwrap_or_else(|_| ApiError {
+                code: status.as_u16(),
+                message: "Unknown error".to_string(),
+            });
+        
+        Err(anyhow::anyhow!("API error {}: {}", error.code, error.message))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiError {
+    code: u16,
+    message: String,
+}
+```
+
+### Database Integration Patterns
+```rust
+use sqlx::{PgPool, Row, Transaction};
+use uuid::Uuid;
+use anyhow::Result;
+
+// Good: Repository pattern with proper error handling
+pub struct UserRepository {
+    pool: PgPool,
+}
+
+impl UserRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+    
+    pub async fn create_user(&self, user: &CreateUserRequest) -> Result<User> {
+        let user_id = Uuid::new_v4();
+        
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO users (id, email, display_name, created_at)
+            VALUES ($1, $2, $3, NOW())
+            RETURNING id, email, display_name, created_at, updated_at
+            "#,
+            user_id,
+            user.email,
+            user.display_name
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to create user")?;
+        
+        Ok(User {
+            id: UserId::from(row.id),
+            email: row.email,
+            display_name: row.display_name,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            is_active: true,
+            last_login: None,
+            password_hash: None,
+        })
+    }
+    
+    pub async fn get_user(&self, user_id: UserId) -> Result<Option<User>> {
+        let row = sqlx::query!(
+            "SELECT id, email, display_name, created_at, updated_at FROM users WHERE id = $1",
+            *user_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to fetch user")?;
+        
+        Ok(row.map(|row| User {
+            id: UserId::from(row.id),
+            email: row.email,
+            display_name: row.display_name,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            is_active: true,
+            last_login: None,
+            password_hash: None,
+        }))
+    }
+    
+    // Transaction example
+    pub async fn transfer_ownership(
+        &self,
+        from_user: UserId,
+        to_user: UserId,
+        project_id: ProjectId,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await
+            .context("Failed to start transaction")?;
+        
+        // Verify users exist
+        let from_exists = self.user_exists(&mut tx, from_user).await?;
+        let to_exists = self.user_exists(&mut tx, to_user).await?;
+        
+        if !from_exists || !to_exists {
+            return Err(anyhow::anyhow!("One or both users do not exist"));
+        }
+        
+        // Update project ownership
+        sqlx::query!(
+            "UPDATE projects SET owner_id = $1, updated_at = NOW() WHERE id = $2 AND owner_id = $3",
+            *to_user,
+            *project_id,
+            *from_user
+        )
+        .execute(&mut *tx)
+        .await
+        .context("Failed to update project ownership")?;
+        
+        tx.commit().await
+            .context("Failed to commit transaction")?;
+        
+        Ok(())
+    }
+    
+    async fn user_exists(&self, tx: &mut Transaction<'_, sqlx::Postgres>, user_id: UserId) -> Result<bool> {
+        let result = sqlx::query!(
+            "SELECT 1 FROM users WHERE id = $1",
+            *user_id
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .context("Failed to check user existence")?;
+        
+        Ok(result.is_some())
+    }
+}
+```
+
+## Integration Anti-Patterns to Avoid
+
+### Dependency Anti-Patterns
+```rust
+// Avoid: Too many small utility crates
+[dependencies]
+left-pad = "1.0"        # Don't add trivial dependencies
+is-odd = "1.0"          # Can be implemented in 1 line
+is-even = "1.0"         # Adds compilation overhead
+
+// Avoid: Wildcard version specifiers
+serde = "*"             # Use specific versions
+tokio = ">=1.0"         # Pin to major versions
+
+// Better: Specific, well-maintained dependencies
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+```
+
+### API Design Anti-Patterns
+```rust
+// Avoid: Overly generic error types
+fn process_data(data: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // Too generic, loses error context
+}
+
+// Better: Specific error types
+fn process_data(data: &str) -> Result<String, ProcessingError> {
+    // Clear error contract
+}
+
+// Avoid: Blocking operations in async contexts
+async fn bad_async_function() -> Result<String> {
+    let content = std::fs::read_to_string("file.txt")?; // Blocking!
+    Ok(content)
+}
+
+// Better: Use async file operations
+async fn good_async_function() -> Result<String> {
+    let content = tokio::fs::read_to_string("file.txt").await?;
+    Ok(content)
+}
+```
+
+## Best Practices Summary
+
+1. **Choose Stable Dependencies**: Prefer crates with stable APIs and active maintenance
+2. **Minimize Dependencies**: Only add dependencies that provide significant value
+3. **Follow Conventions**: Use established patterns from the ecosystem
+4. **Proper Feature Gates**: Use features to make optional functionality optional
+5. **Security First**: Regularly audit dependencies for vulnerabilities
+6. **Documentation**: Follow rustdoc conventions and provide examples
+7. **Testing Integration**: Use ecosystem testing tools and patterns
+8. **Performance Awareness**: Consider compile-time and runtime costs
+9. **Compatibility**: Follow semantic versioning and API stability guidelines
+10. **Community Standards**: Participate in and follow Rust community best practices

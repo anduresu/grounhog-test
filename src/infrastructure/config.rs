@@ -5,7 +5,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::infrastructure::error::{ConfigError, GroundhogError};
 
 /// Main configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -119,17 +119,7 @@ fn default_threads() -> usize { 4 }
 fn default_true() -> bool { true }
 fn default_false() -> bool { false }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            logging: LoggingConfig::default(),
-            commands: CommandsConfig::default(),
-            ai: None,
-            output: OutputConfig::default(),
-            performance: PerformanceConfig::default(),
-        }
-    }
-}
+
 
 impl Default for LoggingConfig {
     fn default() -> Self {

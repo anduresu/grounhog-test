@@ -1,5 +1,546 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
+# Rust Traits and Generics Mastery
+
+## Purpose
+Define advanced patterns for traits, generics, associated types, and type system features to create flexible, reusable, and zero-cost abstractions.
+
+## Requirements
+
+### Trait Design Principles
+- Design traits for specific capabilities, not concrete types
+- Use associated types for relationships between input/output types
+- Prefer generic parameters for flexibility, associated types for uniqueness
+- Implement coherent trait hierarchies with clear responsibilities
+- Use marker traits for compile-time guarantees
+
+### Generic Programming
+- Use meaningful constraint names with `where` clauses
+- Prefer generic functions over trait objects for performance
+- Use `PhantomData` for unused type parameters
+- Implement `Default` bounds strategically
+- Use const generics for compile-time configuration
+
+### Advanced Type Patterns
+- Leverage the type system for compile-time validation
+- Use newtypes for domain modeling and type safety
+- Implement builder patterns with type states
+- Use GATs (Generic Associated Types) for advanced abstractions
+- Design APIs that prevent misuse through types
+
+### Performance Considerations
+- Prefer monomorphization over dynamic dispatch
+- Use `#[inline]` judiciously for generic functions
+- Consider code size impact of aggressive generics
+- Use trait objects when runtime polymorphism is needed
+- Profile generic vs dynamic dispatch trade-offs
+
+## Examples
+
+### Advanced Trait Design
+```rust
+use std::marker::PhantomData;
+
+// Good: Trait with associated types for unique relationships
+trait Iterator {
+    type Item;
+    
+    fn next(&mut self) -> Option<Self::Item>;
+    
+    // Default implementations using associated types
+    fn collect<B: FromIterator<Self::Item>>(self) -> B
+    where
+        Self: Sized,
+    {
+        FromIterator::from_iter(self)
+    }
+}
+
+// Good: Generic trait for flexible implementations
+trait Parser<Input, Output, Error> {
+    fn parse(&self, input: Input) -> Result<Output, Error>;
+}
+
+// Good: Trait with generic associated types (GATs)
+trait LendingIterator {
+    type Item<'a> where Self: 'a;
+    
+    fn next<'a>(&'a mut self) -> Option<Self::Item<'a>>;
+}
+
+// Good: Marker traits for compile-time guarantees
+trait ThreadSafe: Send + Sync {}
+impl<T: Send + Sync> ThreadSafe for T {}
+
+trait ZeroCost {}
+
+// Good: Trait hierarchy with clear relationships
+trait Animal {
+    fn name(&self) -> &str;
+    fn speak(&self) -> String;
+}
+
+trait Mammal: Animal {
+    fn fur_color(&self) -> &str;
+    
+    // Default implementation using parent trait
+    fn describe(&self) -> String {
+        format!("{} is a {} mammal that says '{}'", 
+                self.name(), self.fur_color(), self.speak())
+    }
+}
+
+trait Carnivore: Animal {
+    fn hunt(&self) -> String;
+}
+
+// Multiple trait bounds
+trait Predator: Mammal + Carnivore {
+    fn stalk_prey(&self) -> String {
+        format!("{} quietly stalks before {}", self.name(), self.hunt())
+    }
+}
+```
+
+### Generic Function Patterns
+```rust
+use std::hash::Hash;
+use std::collections::HashMap;
+
+// Good: Well-constrained generic function
+fn group_by<T, K, F>(items: Vec<T>, key_fn: F) -> HashMap<K, Vec<T>>
+where
+    T: Clone,
+    K: Eq + Hash,
+    F: Fn(&T) -> K,
+{
+    let mut groups = HashMap::new();
+    for item in items {
+        let key = key_fn(&item);
+        groups.entry(key).or_insert_with(Vec::new).push(item);
+    }
+    groups
+}
+
+// Good: Generic with multiple trait bounds
+fn process_and_log<T, E, F>(items: Vec<T>, processor: F) -> Vec<Result<String, E>>
+where
+    T: std::fmt::Debug + Clone,
+    E: std::fmt::Display + std::fmt::Debug,
+    F: Fn(T) -> Result<String, E>,
+{
+    items.into_iter().map(|item| {
+        tracing::debug!("Processing item: {:?}", item);
+        let result = processor(item.clone());
+        if let Err(ref e) = result {
+            tracing::error!("Processing failed for {:?}: {}", item, e);
+        }
+        result
+    }).collect()
+}
+
+// Good: Generic with lifetime parameters
+fn find_longest_matching<'a, T, P>(items: &'a [T], predicate: P) -> Option<&'a T>
+where
+    T: AsRef<str>,
+    P: Fn(&T) -> bool,
+{
+    items
+        .iter()
+        .filter(|item| predicate(item))
+        .max_by_key(|item| item.as_ref().len())
+}
+
+// Good: Using PhantomData for type safety
+struct TypedId<T> {
+    id: u64,
+    _phantom: PhantomData<T>,
+}
+
+impl<T> TypedId<T> {
+    fn new(id: u64) -> Self {
+        Self { id, _phantom: PhantomData }
+    }
+    
+    fn value(&self) -> u64 {
+        self.id
+    }
+}
+
+// Usage prevents mixing different entity types
+type UserId = TypedId<User>;
+type ProductId = TypedId<Product>;
+
+fn get_user(id: UserId) -> Option<User> { /* ... */ }
+// get_user(ProductId::new(1)); // Compile error!
+```
+
+### Type-State Pattern
+```rust
+// Good: Type-state builder pattern
+struct HttpRequestBuilder<State> {
+    url: Option<String>,
+    method: Option<String>,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+    _state: PhantomData<State>,
+}
+
+struct Incomplete;
+struct Complete;
+
+impl HttpRequestBuilder<Incomplete> {
+    fn new() -> Self {
+        Self {
+            url: None,
+            method: None,
+            headers: Vec::new(),
+            body: None,
+            _state: PhantomData,
+        }
+    }
+    
+    fn url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
+        self
+    }
+    
+    fn method(mut self, method: impl Into<String>) -> Self {
+        self.method = Some(method.into());
+        self
+    }
+}
+
+impl HttpRequestBuilder<Incomplete> {
+    fn build(self) -> Option<HttpRequestBuilder<Complete>> {
+        if self.url.is_some() && self.method.is_some() {
+            Some(HttpRequestBuilder {
+                url: self.url,
+                method: self.method,
+                headers: self.headers,
+                body: self.body,
+                _state: PhantomData,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl HttpRequestBuilder<Complete> {
+    fn execute(self) -> Result<HttpResponse, HttpError> {
+        // Can only execute complete requests
+        todo!()
+    }
+}
+
+// Usage
+let request = HttpRequestBuilder::new()
+    .url("https://api.example.com")
+    .method("GET")
+    .build()?
+    .execute()?;
+```
+
+### Newtype Pattern for Domain Modeling
+```rust
+// Good: Newtypes for domain validation
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Email(String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct UserId(u64);
+
+#[derive(Debug, Clone, PartialEq)]
+struct Money {
+    amount: u64, // cents
+    currency: Currency,
+}
+
+impl Email {
+    fn new(email: String) -> Result<Self, ValidationError> {
+        if email.contains('@') && email.len() > 3 {
+            Ok(Email(email))
+        } else {
+            Err(ValidationError::InvalidEmail)
+        }
+    }
+    
+    fn domain(&self) -> &str {
+        self.0.split('@').nth(1).unwrap_or("")
+    }
+}
+
+impl UserId {
+    fn new(id: u64) -> Self {
+        UserId(id)
+    }
+    
+    fn value(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Money {
+    fn new(amount: u64, currency: Currency) -> Self {
+        Self { amount, currency }
+    }
+    
+    fn add(self, other: Money) -> Result<Money, MoneyError> {
+        if self.currency == other.currency {
+            Ok(Money {
+                amount: self.amount + other.amount,
+                currency: self.currency,
+            })
+        } else {
+            Err(MoneyError::CurrencyMismatch)
+        }
+    }
+}
+
+// Implementing common traits for newtypes
+impl std::fmt::Display for Email {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<UserId> for u64 {
+    fn from(id: UserId) -> u64 {
+        id.0
+    }
+}
+```
+
+### Advanced Generic Patterns
+```rust
+// Good: Generic repository pattern
+trait Repository<T, Id> {
+    type Error;
+    
+    async fn find_by_id(&self, id: Id) -> Result<Option<T>, Self::Error>;
+    async fn save(&self, entity: &T) -> Result<(), Self::Error>;
+    async fn delete(&self, id: Id) -> Result<bool, Self::Error>;
+}
+
+// Good: Generic visitor pattern
+trait Visitor<T> {
+    type Output;
+    
+    fn visit(&mut self, item: &T) -> Self::Output;
+}
+
+struct CountingVisitor {
+    count: usize,
+}
+
+impl<T> Visitor<T> for CountingVisitor {
+    type Output = usize;
+    
+    fn visit(&mut self, _item: &T) -> usize {
+        self.count += 1;
+        self.count
+    }
+}
+
+// Good: Generic event system
+trait Event: Send + Sync + 'static {}
+
+trait EventHandler<E: Event> {
+    async fn handle(&self, event: E) -> Result<(), HandlerError>;
+}
+
+struct EventBus {
+    handlers: HashMap<TypeId, Vec<Box<dyn AnyHandler>>>,
+}
+
+trait AnyHandler: Send + Sync {
+    fn handle_any(&self, event: Box<dyn std::any::Any + Send>) -> BoxFuture<'_, Result<(), HandlerError>>;
+}
+
+impl<E: Event, H: EventHandler<E> + Send + Sync> AnyHandler for H {
+    fn handle_any(&self, event: Box<dyn std::any::Any + Send>) -> BoxFuture<'_, Result<(), HandlerError>> {
+        Box::pin(async move {
+            if let Ok(event) = event.downcast::<E>() {
+                self.handle(*event).await
+            } else {
+                Err(HandlerError::TypeMismatch)
+            }
+        })
+    }
+}
+```
+
+### Const Generics
+```rust
+// Good: Compile-time sized arrays
+struct Matrix<T, const ROWS: usize, const COLS: usize> {
+    data: [[T; COLS]; ROWS],
+}
+
+impl<T, const ROWS: usize, const COLS: usize> Matrix<T, ROWS, COLS>
+where
+    T: Default + Copy,
+{
+    fn new() -> Self {
+        Self {
+            data: [[T::default(); COLS]; ROWS],
+        }
+    }
+    
+    fn get(&self, row: usize, col: usize) -> Option<&T> {
+        self.data.get(row)?.get(col)
+    }
+}
+
+// Matrix multiplication with compile-time dimension checking
+impl<T, const N: usize, const M: usize, const P: usize> Matrix<T, N, M>
+where
+    T: Default + Copy + std::ops::Add<Output = T> + std::ops::Mul<Output = T>,
+{
+    fn multiply(&self, other: &Matrix<T, M, P>) -> Matrix<T, N, P> {
+        let mut result = Matrix::<T, N, P>::new();
+        for i in 0..N {
+            for j in 0..P {
+                let mut sum = T::default();
+                for k in 0..M {
+                    sum = sum + self.data[i][k] * other.data[k][j];
+                }
+                result.data[i][j] = sum;
+            }
+        }
+        result
+    }
+}
+
+// Good: Generic buffer with compile-time size
+struct RingBuffer<T, const N: usize> {
+    data: [Option<T>; N],
+    head: usize,
+    tail: usize,
+    len: usize,
+}
+
+impl<T, const N: usize> RingBuffer<T, N> {
+    fn new() -> Self {
+        Self {
+            data: [const { None }; N],
+            head: 0,
+            tail: 0,
+            len: 0,
+        }
+    }
+    
+    fn push(&mut self, item: T) -> Result<(), T> {
+        if self.len == N {
+            Err(item) // Buffer full
+        } else {
+            self.data[self.tail] = Some(item);
+            self.tail = (self.tail + 1) % N;
+            self.len += 1;
+            Ok(())
+        }
+    }
+    
+    fn pop(&mut self) -> Option<T> {
+        if self.len == 0 {
+            None
+        } else {
+            let item = self.data[self.head].take();
+            self.head = (self.head + 1) % N;
+            self.len -= 1;
+            item
+        }
+    }
+}
+```
+
+## Exceptions
+
+- Trait objects are acceptable when runtime polymorphism is required
+- Simple generic constraints may omit `where` clauses for readability
+- Associated types may be unnecessary for simple generic relationships
+- `Box<dyn Trait>` is acceptable for heterogeneous collections
+- Some patterns may require higher-kinded types (not yet in stable Rust)
+
+## Anti-Patterns to Avoid
+
+```rust
+// Avoid: Overly complex trait hierarchies
+trait Bad: Send + Sync + Clone + Debug + Display + Hash + Eq + Ord {
+    // Too many requirements
+}
+
+// Avoid: Generic parameters without bounds
+fn bad_generic<T>(item: T) -> T {
+    // Can't do anything useful with T
+    item
+}
+
+// Avoid: Unnecessary trait objects
+fn bad_trait_object(items: Vec<Box<dyn Display>>) {
+    // Could use generics instead for better performance
+}
+
+// Avoid: Associated types when generic parameters are better
+trait BadIterator {
+    type Input;  // Should be generic parameter
+    type Output; // Should be generic parameter
+    
+    fn transform(&self, input: Self::Input) -> Self::Output;
+}
+
+// Avoid: Overly generic APIs
+fn bad_overly_generic<T, U, V, W>(a: T, b: U, c: V) -> W
+where
+    T: Into<U> + Clone,
+    U: AsRef<V> + Default,
+    V: FromStr + Display,
+    W: From<V> + Debug,
+{
+    // Too complex for most use cases
+}
+```
+
+## Performance Tips
+
+- Use `#[inline]` for small generic functions that should be optimized
+- Consider monomorphization cost vs performance benefits
+- Profile different generic vs trait object approaches
+- Use `dyn Trait` when you need heterogeneous collections
+- Be aware of code bloat from excessive generic instantiation
+
+## Testing Generic Code
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_generic_function() {
+        // Test with different types
+        let strings = vec!["a".to_string(), "bb".to_string(), "ccc".to_string()];
+        let grouped = group_by(strings, |s| s.len());
+        
+        assert_eq!(grouped[&1].len(), 1);
+        assert_eq!(grouped[&2].len(), 1);
+        assert_eq!(grouped[&3].len(), 1);
+    }
+    
+    #[test]
+    fn test_type_safety() {
+        let user_id = UserId::new(42);
+        let product_id = ProductId::new(42);
+        
+        // This should compile
+        assert_eq!(user_id.value(), 42);
+        
+        // This would not compile (type safety):
+        // assert_eq!(user_id, product_id);
+    }
+}
+```
