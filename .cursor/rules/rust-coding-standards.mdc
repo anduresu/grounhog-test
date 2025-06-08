@@ -1,0 +1,249 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Rust Coding Standards
+
+## Purpose
+Define coding standards and best practices for Rust development in the Groundhog project.
+
+## Requirements
+
+### Code Style
+- Use `cargo fmt` for consistent formatting with project-specific `.rustfmt.toml`
+- Follow Rust naming conventions (snake_case for functions/variables, PascalCase for types)
+- Use `#[derive(Debug)]` for all custom types unless there's a specific reason not to
+- Prefer explicit error handling with `Result<T, E>` over panicking
+- Use `#[must_use]` attribute for functions where ignoring the return value is likely a bug
+- Prefer `const` over `static` for immutable values
+- Use `#[repr(transparent)]` for newtype wrappers over foreign types
+
+### Documentation
+- All public functions must have documentation comments (`///`)
+- Include examples in documentation for complex functions
+- Document error conditions in the "Errors" section
+- Use `#[doc(hidden)]` for implementation details that should not appear in docs
+- Include performance characteristics in documentation for performance-critical code
+- Use `cargo doc --document-private-items` to ensure comprehensive documentation
+
+### Error Handling
+- Use the `?` operator for error propagation
+- Create custom error types using `thiserror` crate
+- Never use `unwrap()` in production code - use `expect()` with descriptive messages if necessary
+- Use `anyhow` for application-level error handling where error types don't need to be exhaustive
+- Implement proper error context with `anyhow::Context` trait
+- Use `miette` for enhanced error reporting in CLI applications
+
+### Imports
+- Group imports: std library, external crates, local modules
+- Use explicit imports rather than glob imports (`use module::*`)
+- Sort imports alphabetically within each group
+- Use `use crate::` for absolute paths within the same crate
+- Prefer `use super::` for parent module access
+- Use `#[allow(unused_imports)]` sparingly and document why
+
+### Security and Safety
+- Always validate input at API boundaries
+- Use `secrecy::Secret` for sensitive data like passwords and tokens
+- Implement constant-time comparison for cryptographic values
+- Use `zeroize::Zeroize` for clearing sensitive data from memory
+- Prefer `ring` or `rustls` over `openssl` for cryptographic operations
+- Use `url::Url` for URL parsing to prevent injection attacks
+
+### Modern Rust Features (2021+ Edition)
+- Use `let-else` patterns for early returns: `let Some(value) = option else { return; };`
+- Leverage `if let` chains for complex pattern matching
+- Use array methods like `std::array::from_fn` for array initialization
+- Use `Option::zip` and `Result::and_then` for chaining operations
+- Prefer `matches!` macro for pattern matching booleans
+- Use `std::mem::take` instead of `std::mem::replace` with `Default::default()`
+
+## Examples
+
+### Modern Error Handling with Context
+```rust
+use anyhow::{Context, Result};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ConfigError {
+    #[error("Invalid configuration value for {field}: {value}")]
+    InvalidValue { field: String, value: String },
+    
+    #[error("Missing required configuration field: {field}")]
+    MissingField { field: String },
+    
+    #[error("Configuration file error")]
+    FileError(#[from] std::io::Error),
+}
+
+/// Loads configuration with proper error context
+fn load_config(path: &Path) -> Result<Config> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+    
+    let config: Config = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+    
+    validate_config(&config)?;
+    Ok(config)
+}
+
+// Using let-else for early returns
+fn parse_user_input(input: &str) -> Result<UserId> {
+    let Some(id_str) = input.strip_prefix("user:") else {
+        return Err(anyhow::anyhow!("Invalid user input format"));
+    };
+    
+    let id: u64 = id_str.parse()
+        .context("Invalid user ID number")?;
+    
+    Ok(UserId::new(id))
+}
+```
+
+### Security-Conscious Patterns
+```rust
+use secrecy::{Secret, ExposeSecret};
+use zeroize::Zeroize;
+use constant_time_eq::constant_time_eq;
+
+#[derive(Zeroize)]
+pub struct UserCredentials {
+    username: String,
+    #[zeroize(skip)] // Don't zeroize the Secret wrapper
+    password: Secret<String>,
+}
+
+impl UserCredentials {
+    pub fn new(username: String, password: String) -> Self {
+        Self {
+            username,
+            password: Secret::new(password),
+        }
+    }
+    
+    /// Validates credentials using constant-time comparison
+    pub fn validate(&self, provided_password: &str) -> bool {
+        // Use constant_time_eq to prevent timing attacks
+        constant_time_eq(
+            self.password.expose_secret().as_bytes(),
+            provided_password.as_bytes()
+        )
+    }
+}
+
+// Secure URL handling
+fn parse_user_url(input: &str) -> Result<url::Url> {
+    let url = url::Url::parse(input)
+        .context("Invalid URL format")?;
+    
+    // Validate scheme to prevent dangerous protocols
+    match url.scheme() {
+        "http" | "https" => Ok(url),
+        scheme => Err(anyhow::anyhow!("Unsupported URL scheme: {}", scheme)),
+    }
+}
+```
+
+### Function Documentation with Performance Notes
+```rust
+/// Processes a large dataset using parallel iteration.
+///
+/// # Arguments
+///
+/// * `data` - Input dataset to process
+/// * `chunk_size` - Size of chunks for parallel processing
+///
+/// # Returns
+///
+/// Returns a `Result` containing the processed data or an error.
+///
+/// # Performance
+///
+/// This function uses Rayon for parallel processing. Performance is optimal
+/// when `chunk_size` is between 1000-10000 items. For datasets smaller than
+/// 1000 items, consider using the non-parallel version.
+///
+/// Time complexity: O(n) where n is the number of items
+/// Space complexity: O(n) for result storage
+///
+/// # Examples
+///
+/// ```rust
+/// use groundhog::processing::process_dataset;
+/// 
+/// let data = vec![1, 2, 3, 4, 5];
+/// let result = process_dataset(&data, 1000)?;
+/// assert_eq!(result.len(), data.len());
+/// ```
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// - Input data contains invalid values
+/// - System runs out of memory during processing
+/// - Thread pool initialization fails
+#[must_use = "processed data should be used or explicitly ignored"]
+pub fn process_dataset(data: &[DataItem], chunk_size: usize) -> Result<Vec<ProcessedItem>, ProcessingError> {
+    // Implementation
+}
+```
+
+### Import Organization with Modern Patterns
+```rust
+// Standard library imports (grouped logically)
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::{BufReader, Read},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+// External crate imports (alphabetical)
+use anyhow::{Context, Result};
+use clap::Parser;
+use serde::{Deserialize, Serialize};
+use tokio::{fs, time::sleep};
+use tracing::{debug, error, info, warn};
+use uuid::Uuid;
+
+// Local module imports (from general to specific)
+use crate::{
+    config::{AppConfig, DatabaseConfig},
+    error::{AppError, ConfigError},
+    models::{User, UserRole},
+    utils::validation,
+};
+```
+
+## Exceptions
+
+- `unwrap()` is acceptable in tests, examples, and when preceded by explicit checks
+- `expect()` is acceptable for programming errors that should never occur
+- Documentation is not required for private helper functions under 5 lines
+- Glob imports are acceptable for prelude modules and test utilities
+- `#[allow(clippy::...)]` should be documented with reasoning
+- `unsafe` code requires additional documentation (see rust-unsafe.mdc)
+
+## Code Quality Tools
+
+### Required Tools
+- `cargo clippy` - Use for linting with project-specific configuration
+- `cargo fmt` - Use for consistent formatting
+- `cargo audit` - Check for security vulnerabilities in dependencies
+- `cargo deny` - Check licenses and ban problematic dependencies
+
+### Recommended Tools
+- `cargo machete` - Find unused dependencies
+- `cargo bloat` - Analyze binary size
+- `cargo udeps` - Find unused dependencies (nightly only)
+- `bacon` - Background compilation checker
+
+### Editor Integration
+- Configure your editor to run `cargo clippy` and `cargo fmt` on save
+- Use rust-analyzer for IDE-like features
+- Enable inlay hints for type information

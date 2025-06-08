@@ -1,0 +1,83 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# MDC Rule Management
+
+## Rule Organization Requirements
+
+When creating new Cursor IDE AI Model-driven Configuration (MDC) rules:
+
+1. **Location**: Always create new MDC rules in the `.cursor/rules/` directory
+2. **File Structure**: Each rule must be a separate `.mdc` file
+3. **Naming Convention**: Use kebab-case for rule file names (e.g., `rust-coding-standards.mdc`, `logging-patterns.mdc`)
+4. **File Extension**: All MDC rule files must use the `.mdc` extension
+
+## Rule Creation Guidelines
+
+### File Naming Pattern
+```
+.cursor/rules/{rule-category}-{specific-purpose}.mdc
+```
+
+Examples:
+- `.cursor/rules/rust-error-handling.mdc`
+- `.cursor/rules/testing-patterns.mdc`
+- `.cursor/rules/documentation-standards.mdc`
+- `.cursor/rules/git-commit-conventions.mdc`
+
+### Rule File Structure
+Each MDC rule file should follow this structure:
+
+```markdown
+# {Rule Title}
+
+## Purpose
+Brief description of what this rule governs.
+
+## Requirements
+List of specific requirements or constraints.
+
+## Examples
+Code examples demonstrating the rule application.
+
+## Exceptions
+Any valid exceptions to the rule.
+```
+
+### Directory Structure
+```
+.cursor/
+└── rules/
+    ├── mdc-rule-management.mdc          # This file
+    ├── rust-coding-standards.mdc
+    ├── testing-patterns.mdc
+    ├── documentation-standards.mdc
+    └── {additional-rules}.mdc
+```
+
+## Implementation Instructions for Cursor AI
+
+When you need to create a new MDC rule:
+
+1. **Check**: Verify the `.cursor/rules/` directory exists
+2. **Create**: If the directory doesn't exist, create it first
+3. **Generate**: Create a new `.mdc` file in `.cursor/rules/` with an appropriate kebab-case name
+4. **Structure**: Follow the standard rule file structure outlined above
+5. **Update**: Never modify this management rule file unless specifically requested
+
+## Rule Categories
+
+Organize rules by these categories:
+- **Language-specific**: `rust-`, `javascript-`, etc.
+- **Process-related**: `testing-`, `deployment-`, `review-`
+- **Documentation**: `docs-`, `comments-`, `readme-`
+- **Project-specific**: `groundhog-`, `cli-`, `logging-`
+
+## Maintenance
+
+- Each rule should be focused on a single concern
+- Rules should be clear, actionable, and specific
+- Avoid duplicating requirements across multiple rule files
+- Update rules when project requirements change

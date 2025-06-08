@@ -1,0 +1,348 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Groundhog Logging Patterns
+
+## Purpose
+Define consistent logging patterns and tracing usage for the Groundhog AI coding assistant CLI application.
+
+## Requirements
+
+### Tracing Instrumentation
+- All public functions must use `#[tracing::instrument]` attribute
+- Command handlers must include `command` field in span
+- File operations must include `path` and `size_bytes` fields
+- Network operations must include `url` and `duration_ms` fields
+
+### Log Levels
+- **ERROR**: Unrecoverable errors that cause command failure
+- **WARN**: Recoverable errors, deprecated usage, configuration issues
+- **INFO**: Command lifecycle events, major milestones
+- **DEBUG**: Function entry/exit, intermediate processing steps
+- **TRACE**: Detailed execution flow, variable values
+
+### Structured Fields
+- Use structured fields instead of formatted strings
+- Include correlation context (operation_id, user_id when available)
+- Add timing information for performance monitoring
+- Never log sensitive data (API keys, user content)
+
+### Error Logging
+- Log all errors with full context before propagation
+- Include error chains and source information
+- Add suggestions for resolution when possible
+
+## Examples
+
+### Command Handler Instrumentation
+```rust
+#[tracing::instrument(
+    name = "command.explain",
+    fields(
+        command = "explain",
+        duration_ms = tracing::field::Empty,
+    )
+)]
+pub fn execute_explain() -> Result<(), GroundhogError> {
+    let start = std::time::Instant::now();
+    
+    info!("Starting explain command");
+    
+    // Command implementation...
+    
+    let duration = start.elapsed();
+    tracing::Span::current().record("duration_ms", duration.as_millis());
+    
+    info!("Explain command completed successfully");
+    Ok(())
+}
+```
+
+### File Operation Logging
+```rust
+#[tracing::instrument(
+    name = "file.read",
+    fields(
+        path = %file_path.display(),
+        size_bytes = tracing::field::Empty,
+    ),
+    skip(content)
+)]
+fn read_file(file_path: &Path) -> Result<String, std::io::Error> {
+    debug!("Reading file");
+    
+    let content = std::fs::read_to_string(file_path)?;
+    
+    tracing::Span::current().record("size_bytes", content.len());
+    info!("File read successfully");
+    
+    Ok(content)
+}
+```
+
+### Error Handling with Context
+```rust
+fn process_config(path: &Path) -> Result<Config, GroundhogError> {
+    match Config::load(path) {
+        Ok(config) => {
+            info!(
+                path = %path.display(),
+                version = %config.version,
+                "Configuration loaded successfully"
+            );
+            Ok(config)
+        }
+        Err(e) => {
+            error!(
+                error = %e,
+                path = %path.display(),
+                error.source = ?e.source(),
+                "Failed to load configuration"
+            );
+            Err(GroundhogError::Config(e))
+        }
+    }
+}
+```
+
+### Performance Monitoring
+```rust
+async fn ai_api_call(prompt: &str) -> Result<String, NetworkError> {
+    let span = tracing::info_span!(
+        "ai.api_call",
+        provider = "openai",
+        model = "gpt-4",
+        prompt_length = prompt.len(),
+        response_length = tracing::field::Empty,
+        duration_ms = tracing::field::Empty,
+    );
+    
+    async move {
+        let start = std::time::Instant::now();
+        info!("Making AI API call");
+        
+        // API call implementation...
+        let response = make_request(prompt).await?;
+        
+        let duration = start.elapsed();
+        span.record("response_length", response.len());
+        span.record("duration_ms", duration.as_millis());
+        
+        info!("AI API call completed");
+        Ok(response)
+    }
+    .instrument(span)
+    .await
+}
+```
+
+### Structured Event Logging
+```rust
+// Good: Structured logging
+info!(
+    user_input = %input,
+    command = "analyze",
+    file_count = files.len(),
+    "Processing user request"
+);
+
+// Avoid: String formatting
+info!("Processing {} files for analyze command with input: {}", files.len(), input);
+```
+
+### Domain-Specific Events
+```rust
+#[derive(Debug, serde::Serialize)]
+pub enum GroundhogEvent {
+    CodeAnalysisStarted {
+        project_path: String,
+        file_count: usize,
+        analysis_type: String,
+    },
+    
+    AIResponseReceived {
+        provider: String,
+        model: String,
+        prompt_tokens: usize,
+        response_tokens: usize,
+        duration_ms: u64,
+    },
+    
+    FileModified {
+        file_path: String,
+        operation: String,
+        lines_changed: usize,
+    },
+    
+    UserInteraction {
+        interaction_type: String,
+        command: String,
+        success: bool,
+    },
+}
+
+impl GroundhogEvent {
+    pub fn log(&self) {
+        match self {
+            GroundhogEvent::CodeAnalysisStarted { project_path, file_count, analysis_type } => {
+                info!(
+                    event_type = "code_analysis_started",
+                    project_path = %project_path,
+                    file_count = %file_count,
+                    analysis_type = %analysis_type,
+                    "Code analysis started"
+                );
+            },
+            GroundhogEvent::AIResponseReceived { provider, model, prompt_tokens, response_tokens, duration_ms } => {
+                info!(
+                    event_type = "ai_response_received", 
+                    provider = %provider,
+                    model = %model,
+                    prompt_tokens = %prompt_tokens,
+                    response_tokens = %response_tokens,
+                    duration_ms = %duration_ms,
+                    "AI response received"
+                );
+            },
+            GroundhogEvent::FileModified { file_path, operation, lines_changed } => {
+                info!(
+                    event_type = "file_modified",
+                    file_path = %file_path,
+                    operation = %operation,
+                    lines_changed = %lines_changed,
+                    "File modified"
+                );
+            },
+            GroundhogEvent::UserInteraction { interaction_type, command, success } => {
+                info!(
+                    event_type = "user_interaction",
+                    interaction_type = %interaction_type,
+                    command = %command,
+                    success = %success,
+                    "User interaction completed"
+                );
+            },
+        }
+    }
+}
+```
+
+### Groundhog CLI Error Categories
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum GroundhogError {
+    #[error("File operation failed: {operation} on {path}")]
+    FileOperation {
+        operation: String,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    
+    #[error("AI provider error: {provider}")]
+    AIProvider {
+        provider: String,
+        operation: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    
+    #[error("Configuration error: {message}")]
+    Configuration {
+        message: String,
+        config_path: Option<String>,
+    },
+    
+    #[error("Code analysis failed: {reason}")]
+    CodeAnalysis {
+        reason: String,
+        file_path: Option<String>,
+    },
+}
+
+impl GroundhogError {
+    pub fn log_with_context(&self, operation_id: &str) {
+        match self {
+            GroundhogError::FileOperation { operation, path, source } => {
+                error!(
+                    error_category = "file_operation",
+                    operation = %operation,
+                    path = %path,
+                    error = %source,
+                    operation_id = %operation_id,
+                    "File operation failed"
+                );
+            },
+            GroundhogError::AIProvider { provider, operation, source } => {
+                error!(
+                    error_category = "ai_provider",
+                    provider = %provider,
+                    operation = %operation,
+                    error = %source,
+                    operation_id = %operation_id,
+                    "AI provider error"
+                );
+            },
+            GroundhogError::Configuration { message, config_path } => {
+                error!(
+                    error_category = "configuration",
+                    message = %message,
+                    config_path = ?config_path,
+                    operation_id = %operation_id,
+                    "Configuration error"
+                );
+            },
+            GroundhogError::CodeAnalysis { reason, file_path } => {
+                error!(
+                    error_category = "code_analysis",
+                    reason = %reason,
+                    file_path = ?file_path,
+                    operation_id = %operation_id,
+                    "Code analysis failed"
+                );
+            },
+        }
+    }
+}
+```
+
+### Session and Context Tracking
+```rust
+#[derive(Clone)]
+pub struct GroundhogContext {
+    pub session_id: String,
+    pub operation_id: String,
+    pub workspace_path: Option<String>,
+    pub user_preferences: UserPreferences,
+}
+
+impl GroundhogContext {
+    pub fn new_operation(&self) -> Self {
+        Self {
+            session_id: self.session_id.clone(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            workspace_path: self.workspace_path.clone(),
+            user_preferences: self.user_preferences.clone(),
+        }
+    }
+    
+    pub fn create_span(&self, name: &str) -> tracing::Span {
+        tracing::info_span!(
+            name,
+            session_id = %self.session_id,
+            operation_id = %self.operation_id,
+            workspace_path = ?self.workspace_path,
+        )
+    }
+}
+```
+
+## Exceptions
+
+- Test functions may use simplified logging without full instrumentation
+- Internal helper functions under 5 lines may skip instrumentation
+- Debug and trace logs may include more detailed variable dumps
+- Temporary debug logging during development is acceptable but should be removed before production
+- Unit tests may mock or disable logging for faster execution

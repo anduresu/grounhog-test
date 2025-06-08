@@ -1,0 +1,57 @@
+# Groundhog Configuration File
+# This is an example configuration file showing all available options
+# Copy this file to ~/.groundhog/config.toml and modify as needed
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "Info"
+
+# Output format: Pretty, Json, Compact
+format = "Pretty"
+
+# Optional log file path (if not specified, logs go to stderr)
+# file = "/var/log/groundhog.log"
+
+# Include timestamps in log output
+timestamps = true
+
+# Include thread IDs in log output (useful for debugging)
+thread_ids = false
+
+[commands]
+# Default command if none specified (currently not used)
+# default = "help"
+
+[commands.explain]
+# Whether the explain command is enabled
+enabled = true
+
+# Default output format for explain command
+# format = "text"
+
+# Future AI configuration (not yet implemented)
+# [ai]
+# provider = "OpenAI"
+# model = "gpt-4"
+# api_key = "${OPENAI_API_KEY}"  # Use environment variable
+# endpoint = "https://api.openai.com/v1"
+
+[output]
+# Default output format for all commands
+format = "text"
+
+# Enable colored output
+color = true
+
+# Pager settings: "auto", "always", "never", or specific pager command
+pager = "auto"
+
+[performance]
+# Maximum file size to process (in MB)
+max_file_size = 100
+
+# Timeout for operations (in seconds)
+timeout = 30
+
+# Number of worker threads
+threads = 4 

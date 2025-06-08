@@ -1,0 +1,771 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Rust Testing Excellence
+
+## Purpose
+Establish comprehensive testing strategies including unit tests, integration tests, property-based testing, benchmarking, and testing patterns for robust Rust applications.
+
+## Requirements
+
+### Test Organization
+- Use unit tests for testing individual functions and methods
+- Use integration tests for testing public API contracts
+- Use doc tests for ensuring documentation examples work
+- Group related tests in modules with descriptive names
+- Use `#[cfg(test)]` for test-only code and dependencies
+
+### Test Quality
+- Write tests that are fast, reliable, and independent
+- Use descriptive test names that explain what is being tested
+- Follow the Arrange-Act-Assert pattern
+- Test both happy paths and error conditions
+- Use property-based testing for comprehensive coverage
+
+### Assertions and Mocking
+- Prefer specific assertions over generic ones
+- Use custom assert macros for domain-specific testing
+- Mock external dependencies and I/O operations
+- Use dependency injection for testable code
+- Test error conditions and edge cases
+
+### Performance Testing
+- Use criterion for microbenchmarks
+- Test for performance regressions
+- Profile memory usage and allocations
+- Test async code with proper runtime setup
+- Measure and document performance characteristics
+
+## Examples
+
+### Unit Test Patterns
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    
+    // Good: Descriptive test names
+    #[test]
+    fn user_creation_with_valid_email_succeeds() {
+        let email = "user@example.com";
+        let result = User::new(email);
+        
+        assert!(result.is_ok());
+        let user = result.unwrap();
+        assert_eq!(user.email(), email);
+    }
+    
+    #[test]
+    fn user_creation_with_invalid_email_fails() {
+        let invalid_emails = vec!["", "invalid", "@domain.com", "user@"];
+        
+        for email in invalid_emails {
+            let result = User::new(email);
+            assert!(result.is_err(), "Expected error for email: {}", email);
+        }
+    }
+    
+    // Good: Testing error types
+    #[test]
+    fn user_creation_with_empty_email_returns_validation_error() {
+        let result = User::new("");
+        
+        match result {
+            Err(UserError::Validation(ValidationError::EmptyEmail)) => {},
+            other => panic!("Expected ValidationError::EmptyEmail, got {:?}", other),
+        }
+    }
+    
+    // Good: Parameterized testing
+    #[test]
+    fn calculate_discount_for_various_amounts() {
+        let test_cases = vec![
+            (100, 0.0, 100.0),   // No discount under threshold
+            (1000, 0.1, 900.0),  // 10% discount for medium amount
+            (5000, 0.2, 4000.0), // 20% discount for large amount
+        ];
+        
+        for (amount, expected_rate, expected_total) in test_cases {
+            let discount = calculate_discount(amount);
+            assert_eq!(discount.rate, expected_rate);
+            assert_eq!(discount.apply_to(amount), expected_total);
+        }
+    }
+    
+    // Good: Testing collections and state
+    #[test]
+    fn shopping_cart_calculates_total_correctly() {
+        let mut cart = ShoppingCart::new();
+        
+        cart.add_item(Item::new("apple", 1.50), 3);
+        cart.add_item(Item::new("banana", 0.75), 2);
+        
+        assert_eq!(cart.item_count(), 2);
+        assert_eq!(cart.total_quantity(), 5);
+        assert_eq!(cart.total_price(), 6.00);
+    }
+}
+
+// Good: Test utilities and helpers
+#[cfg(test)]
+mod test_utils {
+    use super::*;
+    
+    pub fn create_test_user(email: &str) -> User {
+        User::new(email).expect("Test user creation should succeed")
+    }
+    
+    pub fn create_sample_items() -> Vec<Item> {
+        vec![
+            Item::new("apple", 1.50),
+            Item::new("banana", 0.75),
+            Item::new("orange", 2.00),
+        ]
+    }
+    
+    // Custom assertion macro for domain objects
+    macro_rules! assert_user_equals {
+        ($actual:expr, $expected_email:expr, $expected_name:expr) => {
+            assert_eq!($actual.email(), $expected_email);
+            assert_eq!($actual.name(), $expected_name);
+        };
+    }
+}
+```
+
+### Integration Test Patterns
+```rust
+// tests/integration_test.rs
+use myapp::{App, Config, Database};
+use std::sync::Arc;
+use tokio_test;
+
+#[tokio::test]
+async fn full_user_workflow_integration_test() {
+    // Arrange: Set up test environment
+    let config = Config::test_config();
+    let db = Database::new_in_memory().await.unwrap();
+    let app = App::new(config, Arc::new(db));
+    
+    // Act & Assert: Test complete workflow
+    let user_data = json!({
+        "email": "test@example.com",
+        "name": "Test User"
+    });
+    
+    // Create user
+    let create_response = app.create_user(user_data).await.unwrap();
+    assert_eq!(create_response.status(), 201);
+    let user_id = create_response.json::<User>().await.unwrap().id();
+    
+    // Retrieve user
+    let get_response = app.get_user(user_id).await.unwrap();
+    assert_eq!(get_response.status(), 200);
+    
+    // Update user
+    let update_data = json!({"name": "Updated Name"});
+    let update_response = app.update_user(user_id, update_data).await.unwrap();
+    assert_eq!(update_response.status(), 200);
+    
+    // Delete user
+    let delete_response = app.delete_user(user_id).await.unwrap();
+    assert_eq!(delete_response.status(), 204);
+    
+    // Verify deletion
+    let get_deleted_response = app.get_user(user_id).await.unwrap();
+    assert_eq!(get_deleted_response.status(), 404);
+}
+
+#[tokio::test]
+async fn api_error_handling_integration_test() {
+    let app = setup_test_app().await;
+    
+    // Test validation errors
+    let invalid_data = json!({"email": "invalid"});
+    let response = app.create_user(invalid_data).await.unwrap();
+    assert_eq!(response.status(), 400);
+    
+    let error: ApiError = response.json().await.unwrap();
+    assert_eq!(error.code, "VALIDATION_ERROR");
+    assert!(error.message.contains("Invalid email"));
+}
+
+// Good: Test fixtures and builders
+struct TestAppBuilder {
+    config: Config,
+    with_db: bool,
+    with_auth: bool,
+}
+
+impl TestAppBuilder {
+    fn new() -> Self {
+        Self {
+            config: Config::test_config(),
+            with_db: true,
+            with_auth: false,
+        }
+    }
+    
+    fn with_auth(mut self) -> Self {
+        self.with_auth = true;
+        self
+    }
+    
+    fn without_db(mut self) -> Self {
+        self.with_db = false;
+        self
+    }
+    
+    async fn build(self) -> App {
+        let db = if self.with_db {
+            Some(Arc::new(Database::new_in_memory().await.unwrap()))
+        } else {
+            None
+        };
+        
+        App::new(self.config, db)
+    }
+}
+```
+
+### Property-Based Testing
+```rust
+use proptest::prelude::*;
+
+// Good: Property-based testing for business logic
+proptest! {
+    #[test]
+    fn user_serialization_roundtrip(
+        email in "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}",
+        name in "[a-zA-Z ]{1,50}"
+    ) {
+        let original_user = User::new(&email).unwrap().with_name(&name);
+        let serialized = serde_json::to_string(&original_user).unwrap();
+        let deserialized: User = serde_json::from_str(&serialized).unwrap();
+        
+        prop_assert_eq!(original_user.email(), deserialized.email());
+        prop_assert_eq!(original_user.name(), deserialized.name());
+    }
+    
+    #[test]
+    fn shopping_cart_total_is_sum_of_items(
+        items in prop::collection::vec(
+            (any::<f64>().prop_filter("positive", |&x| x > 0.0 && x < 1000.0), 1u32..10),
+            1..20
+        )
+    ) {
+        let mut cart = ShoppingCart::new();
+        let mut expected_total = 0.0;
+        
+        for (price, quantity) in items {
+            let item = Item::new(&format!("item_{}", price), price);
+            cart.add_item(item, quantity);
+            expected_total += price * quantity as f64;
+        }
+        
+        prop_assert!((cart.total_price() - expected_total).abs() < 0.01);
+    }
+    
+    #[test]
+    fn sort_preserves_elements(mut vec in prop::collection::vec(any::<i32>(), 0..100)) {
+        let original_len = vec.len();
+        let mut sorted_vec = vec.clone();
+        sorted_vec.sort();
+        
+        prop_assert_eq!(sorted_vec.len(), original_len);
+        
+        // Check that all elements are preserved
+        vec.sort();
+        prop_assert_eq!(vec, sorted_vec);
+    }
+}
+
+// Good: Custom strategies for domain objects
+fn arbitrary_user() -> impl Strategy<Value = User> {
+    (
+        "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}",
+        "[a-zA-Z ]{1,50}",
+        any::<u64>(),
+    ).prop_map(|(email, name, id)| {
+        User::from_parts(id, email, name)
+    })
+}
+
+proptest! {
+    #[test]
+    fn user_operations_are_consistent(user in arbitrary_user()) {
+        let cloned = user.clone();
+        prop_assert_eq!(user.id(), cloned.id());
+        prop_assert_eq!(user.email(), cloned.email());
+        prop_assert_eq!(user.name(), cloned.name());
+    }
+}
+```
+
+### Mocking and Test Doubles
+```rust
+use mockall::{automock, predicate::*};
+
+// Good: Mockable trait for external dependencies
+#[automock]
+trait EmailService {
+    async fn send_email(&self, to: &str, subject: &str, body: &str) -> Result<(), EmailError>;
+    async fn verify_email(&self, email: &str) -> Result<bool, EmailError>;
+}
+
+#[automock]
+trait PaymentProcessor {
+    async fn charge_card(&self, amount: u64, card_token: &str) -> Result<PaymentResult, PaymentError>;
+    async fn refund_payment(&self, payment_id: &str) -> Result<RefundResult, PaymentError>;
+}
+
+// Good: Testing with mocks
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+    use mockall::predicate::eq;
+    
+    #[tokio::test]
+    async fn user_registration_sends_welcome_email() {
+        let mut mock_email = MockEmailService::new();
+        mock_email
+            .expect_send_email()
+            .with(eq("user@example.com"), eq("Welcome!"), always())
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        
+        let service = UserService::new(Box::new(mock_email));
+        let result = service.register_user("user@example.com", "John Doe").await;
+        
+        assert!(result.is_ok());
+    }
+    
+    #[tokio::test]
+    async fn payment_processing_handles_card_decline() {
+        let mut mock_processor = MockPaymentProcessor::new();
+        mock_processor
+            .expect_charge_card()
+            .with(eq(1000), eq("invalid_token"))
+            .times(1)
+            .returning(|_, _| Err(PaymentError::CardDeclined));
+        
+        let service = OrderService::new(Box::new(mock_processor));
+        let result = service.process_order(create_test_order()).await;
+        
+        match result {
+            Err(OrderError::PaymentFailed(PaymentError::CardDeclined)) => {},
+            other => panic!("Expected CardDeclined error, got {:?}", other),
+        }
+    }
+}
+
+// Good: Dependency injection for testability
+struct UserService {
+    email_service: Box<dyn EmailService + Send + Sync>,
+    db: Box<dyn UserRepository + Send + Sync>,
+}
+
+impl UserService {
+    fn new(
+        email_service: Box<dyn EmailService + Send + Sync>,
+        db: Box<dyn UserRepository + Send + Sync>,
+    ) -> Self {
+        Self { email_service, db }
+    }
+    
+    async fn register_user(&self, email: &str, name: &str) -> Result<User, UserError> {
+        let user = User::new(email)?;
+        self.db.save(&user).await?;
+        
+        self.email_service
+            .send_email(email, "Welcome!", &format!("Welcome, {}!", name))
+            .await
+            .map_err(UserError::EmailFailed)?;
+        
+        Ok(user)
+    }
+}
+```
+
+### Async Testing Patterns
+```rust
+use tokio_test::{assert_ok, assert_err, task};
+use std::time::Duration;
+
+#[tokio::test]
+async fn async_operation_completes_successfully() {
+    let result = async_operation().await;
+    assert_ok!(result);
+}
+
+#[tokio::test]
+async fn async_operation_times_out() {
+    let result = tokio::time::timeout(
+        Duration::from_millis(100),
+        slow_async_operation()
+    ).await;
+    
+    assert!(result.is_err()); // Should timeout
+}
+
+#[tokio::test]
+async fn concurrent_operations_dont_interfere() {
+    let (result1, result2, result3) = tokio::join!(
+        async_operation_1(),
+        async_operation_2(), 
+        async_operation_3()
+    );
+    
+    assert_ok!(result1);
+    assert_ok!(result2);
+    assert_ok!(result3);
+}
+
+// Good: Testing async streams
+#[tokio::test]
+async fn stream_processing_handles_all_items() {
+    use futures::StreamExt;
+    
+    let items = vec![1, 2, 3, 4, 5];
+    let stream = futures::stream::iter(items.clone());
+    
+    let processed: Vec<_> = stream
+        .map(|x| async move { x * 2 })
+        .buffer_unordered(3)
+        .collect()
+        .await;
+    
+    let mut expected: Vec<_> = items.iter().map(|x| x * 2).collect();
+    let mut actual = processed;
+    expected.sort();
+    actual.sort();
+    
+    assert_eq!(actual, expected);
+}
+
+// Good: Testing cancellation
+#[tokio::test]
+async fn operation_handles_cancellation_gracefully() {
+    use tokio_util::sync::CancellationToken;
+    
+    let token = CancellationToken::new();
+    let token_clone = token.clone();
+    
+    let operation = tokio::spawn(async move {
+        cancellable_operation(token_clone).await
+    });
+    
+    // Cancel after a short delay
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    token.cancel();
+    
+    let result = operation.await.unwrap();
+    match result {
+        Err(OperationError::Cancelled) => {}, // Expected
+        other => panic!("Expected cancellation, got {:?}", other),
+    }
+}
+```
+
+### Performance Testing
+```rust
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use criterion::{black_box, Criterion};
+    use std::time::Instant;
+    
+    #[test]
+    fn algorithm_performance_regression_test() {
+        let large_input = generate_large_test_data(10000);
+        let start = Instant::now();
+        
+        let result = expensive_algorithm(&large_input);
+        
+        let duration = start.elapsed();
+        
+        // Ensure we don't regress beyond acceptable limits
+        assert!(duration < Duration::from_millis(500));
+        assert_eq!(result.len(), 10000);
+    }
+    
+    // Integration with criterion for detailed benchmarks
+    fn benchmark_algorithms(c: &mut Criterion) {
+        let small_data = generate_test_data(100);
+        let large_data = generate_test_data(10000);
+        
+        c.bench_function("algorithm_small", |b| {
+            b.iter(|| algorithm(black_box(&small_data)))
+        });
+        
+        c.bench_function("algorithm_large", |b| {
+            b.iter(|| algorithm(black_box(&large_data)))
+        });
+        
+        // Memory allocation testing
+        c.bench_function("algorithm_allocations", |b| {
+            b.iter(|| {
+                let _result = algorithm(black_box(&small_data));
+                // Measure allocations with custom metrics
+            })
+        });
+    }
+}
+
+// Good: Memory usage testing
+#[test]
+fn memory_usage_stays_within_bounds() {
+    let initial_memory = get_memory_usage();
+    
+    {
+        let _large_structure = create_large_structure();
+        let peak_memory = get_memory_usage();
+        
+        // Ensure we don't use excessive memory
+        assert!(peak_memory - initial_memory < 100_000_000); // 100MB limit
+    }
+    
+    // Give GC a chance to run
+    std::hint::black_box(());
+    
+    let final_memory = get_memory_usage();
+    
+    // Ensure memory is properly released
+    assert!(final_memory - initial_memory < 10_000_000); // 10MB tolerance
+}
+```
+
+## Exceptions
+
+- Integration tests may have longer run times
+- Some external dependencies may be difficult to mock
+- Performance tests may be flaky in CI environments
+- Property-based tests may need seed configuration for reproducibility
+- Mock verification may be skipped for simple cases
+
+## Anti-Patterns to Avoid
+
+```rust
+// Avoid: Tests that depend on external state
+#[test]
+fn bad_test_with_external_dependency() {
+    let result = fetch_from_real_api(); // Don't do this!
+    assert!(result.is_ok());
+}
+
+// Avoid: Tests that are too broad
+#[test]
+fn bad_test_everything_at_once() {
+    // This test does too many things
+    let user = create_user();
+    let cart = create_cart();
+    add_items_to_cart();
+    process_payment();
+    send_email();
+    update_inventory();
+    // Too many concerns in one test
+}
+
+// Avoid: Non-deterministic tests
+#[test]
+fn bad_test_with_randomness() {
+    let random_value = rand::random::<u64>();
+    let result = process_value(random_value);
+    // This test might randomly fail
+    assert!(result > 1000); 
+}
+
+// Avoid: Tests without clear assertions
+#[test]
+fn bad_test_without_assertions() {
+    let user = User::new("test@example.com");
+    let cart = ShoppingCart::new();
+    cart.add_item(Item::new("apple", 1.0), 1);
+    // No assertions - what are we testing?
+}
+```
+
+### Snapshot Testing
+- Use `insta` for snapshot testing of outputs
+- Test serialization formats with snapshots
+- Use `assert_debug_snapshot!` for complex data structures
+- Review snapshots in CI/CD pipeline
+- Use `cargo insta review` for interactive snapshot review
+
+### Fuzzing and Property Testing
+- Use `proptest` for property-based testing
+- Use `quickcheck` for simple property tests
+- Implement `arbitrary` for custom types
+- Use `cargo fuzz` for fuzzing critical functions
+- Test edge cases and boundary conditions automatically
+
+## Advanced Testing Patterns
+
+### Test Data Builders and Factories
+```rust
+use chrono::{DateTime, Utc};
+use fake::{Fake, Faker};
+
+// Builder pattern for test data
+#[derive(Debug, Clone)]
+struct UserBuilder {
+    email: Option<String>,
+    name: Option<String>,
+    role: Option<UserRole>,
+    created_at: Option<DateTime<Utc>>,
+}
+
+impl UserBuilder {
+    fn new() -> Self {
+        Self {
+            email: None,
+            name: None,
+            role: None,
+            created_at: None,
+        }
+    }
+    
+    fn email(mut self, email: impl Into<String>) -> Self {
+        self.email = Some(email.into());
+        self
+    }
+    
+    fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+    
+    fn role(mut self, role: UserRole) -> Self {
+        self.role = Some(role);
+        self
+    }
+    
+    fn created_at(mut self, created_at: DateTime<Utc>) -> Self {
+        self.created_at = Some(created_at);
+        self
+    }
+    
+    fn build(self) -> User {
+        User {
+            email: self.email.unwrap_or_else(|| {
+                format!("user{}@example.com", Faker.fake::<u16>())
+            }),
+            name: self.name.unwrap_or_else(|| {
+                format!("User {}", Faker.fake::<u16>())
+            }),
+            role: self.role.unwrap_or(UserRole::Standard),
+            created_at: self.created_at.unwrap_or_else(Utc::now),
+        }
+    }
+}
+
+// Factory functions for common test scenarios
+mod factories {
+    use super::*;
+    
+    pub fn admin_user() -> User {
+        UserBuilder::new()
+            .email("admin@example.com")
+            .name("Admin User")
+            .role(UserRole::Admin)
+            .build()
+    }
+    
+    pub fn standard_user() -> User {
+        UserBuilder::new()
+            .role(UserRole::Standard)
+            .build()
+    }
+    
+    pub fn user_with_email(email: &str) -> User {
+        UserBuilder::new()
+            .email(email)
+            .build()
+    }
+}
+```
+
+### Property-Based Testing
+```rust
+use proptest::prelude::*;
+
+// Custom strategy for generating test data
+fn user_strategy() -> impl Strategy<Value = User> {
+    (
+        "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}",
+        "[A-Za-z ]{2,50}",
+        prop::sample::select(vec![UserRole::Admin, UserRole::Standard]),
+    ).prop_map(|(email, name, role)| {
+        UserBuilder::new()
+            .email(email)
+            .name(name)
+            .role(role)
+            .build()
+    })
+}
+
+proptest! {
+    #[test]
+    fn user_email_is_always_valid(user in user_strategy()) {
+        prop_assert!(is_valid_email(&user.email));
+    }
+    
+    #[test]
+    fn user_serialization_roundtrip(user in user_strategy()) {
+        let json = serde_json::to_string(&user)?;
+        let deserialized: User = serde_json::from_str(&json)?;
+        prop_assert_eq!(user, deserialized);
+    }
+}
+```
+
+### Mock and Stub Patterns
+```rust
+use mockall::{automock, predicate::*};
+
+#[automock]
+trait DatabaseService {
+    async fn get_user(&self, id: UserId) -> Result<Option<User>, DatabaseError>;
+    async fn save_user(&self, user: &User) -> Result<(), DatabaseError>;
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+    
+    #[tokio::test]
+    async fn user_service_retrieves_existing_user() {
+        let mut mock_db = MockDatabaseService::new();
+        let test_user = factories::standard_user();
+        let user_id = test_user.id();
+        
+        mock_db
+            .expect_get_user()
+            .with(eq(user_id))
+            .times(1)
+            .returning(move |_| Ok(Some(test_user.clone())));
+        
+        let service = UserService::new(Box::new(mock_db));
+        let result = service.get_user(user_id).await;
+        
+        assert!(result.is_ok());
+    }
+}
+```
+
+## Testing Tools and Libraries
+
+- `cargo test` for running tests
+- `proptest` for property-based testing
+- `mockall` for mocking traits
+- `criterion` for benchmarking
+- `tokio-test` for async testing utilities
+- `test-case` for parameterized tests
+- `rstest` for fixture-based testing
+- `wiremock` for HTTP mocking
+- `insta` for snapshot testing
+- `fake` for generating test data
+- `tempfile` for temporary file testing
