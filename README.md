@@ -2,6 +2,11 @@
 
 A command-line AI coding assistant built in Rust, designed to help developers with coding tasks, analysis, and assistance.
 
+Following the steps done in https://ghuntley.com/specs/
+Overall it does work but it is really slow. Rust carries a lot of weight, requires tests for python and speed improvement.
+
+Most issues are regarding context-window management from cursor per task done. And overall speed could be improved by doing a task dependency graph with BFS completion.
+
 ## Features
 
 - **Command-line Interface**: Clean, intuitive CLI built with clap
